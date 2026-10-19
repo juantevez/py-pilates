@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from enum import StrEnum
@@ -55,32 +56,66 @@ def previous_weekday(d: date) -> date:
     return d
 
 
+_MAX_SKIP = 90  # tope de días cerrados seguidos que se saltean (ej. vacaciones largas)
+
+
+def next_open_weekday(d: date, closed: Collection[date]) -> date:
+    """Siguiente día hábil después de ``d`` que no está cerrado."""
+    candidate = next_weekday(d)
+    for _ in range(_MAX_SKIP):
+        if candidate not in closed:
+            break
+        candidate = next_weekday(candidate)
+    return candidate
+
+
+def previous_open_weekday(d: date, closed: Collection[date]) -> date:
+    """Día hábil anterior a ``d`` que no está cerrado."""
+    candidate = previous_weekday(d)
+    for _ in range(_MAX_SKIP):
+        if candidate not in closed:
+            break
+        candidate = previous_weekday(candidate)
+    return candidate
+
+
 @dataclass(frozen=True)
 class BookingCalendar:
-    """Horizonte deslizante de 1 día hábil.
+    """Horizonte deslizante de 1 día hábil abierto.
 
-    - La fecha objetivo es siempre el siguiente día hábil (lunes a viernes).
-    - Los turnos de esa fecha se habilitan a ``opening_time`` del día hábil anterior
-      (ej. el viernes a las 20:00 se abren los del lunes).
+    - La fecha objetivo es el siguiente día hábil (lunes a viernes) sin cierre: si mañana el
+      estudio está cerrado, se reserva para el día siguiente que abra.
+    - Los turnos de esa fecha se habilitan a ``opening_time`` del día hábil abierto anterior
+      (ej. el viernes a las 20:00 se abren los del lunes; si el martes está cerrado, el lunes
+      a las 20:00 se abren los del miércoles).
     - Opcionalmente se permite reservar el mismo día si quedan lugares.
+
+    ``closed`` son las fechas con cierre cargado (feriados, vacaciones).
     """
 
     opening_time: time
     allow_same_day: bool = False
 
-    def target_date(self, now: datetime) -> date:
-        return next_weekday(now.date())
+    def target_date(self, now: datetime, closed: Collection[date] = ()) -> date:
+        return next_open_weekday(now.date(), closed)
 
-    def opening_at(self, fecha: date, now: datetime) -> datetime:
-        return datetime.combine(previous_weekday(fecha), self.opening_time, tzinfo=now.tzinfo)
+    def opening_at(self, fecha: date, now: datetime, closed: Collection[date] = ()) -> datetime:
+        return datetime.combine(previous_open_weekday(fecha, closed), self.opening_time, tzinfo=now.tzinfo)
 
-    def is_bookable_date(self, fecha: date, now: datetime) -> bool:
+    def is_bookable_date(self, fecha: date, now: datetime, closed: Collection[date] = ()) -> bool:
         if not is_weekday(fecha):
             return False
         if fecha == now.date():
             return self.allow_same_day
-        return fecha == self.target_date(now) and now >= self.opening_at(fecha, now)
+        return fecha == self.target_date(now, closed) and now >= self.opening_at(fecha, now, closed)
 
-    def bookable_dates(self, now: datetime) -> list[date]:
-        dates = [now.date()] if self.allow_same_day and is_weekday(now.date()) else []
-        return dates + [self.target_date(now)]
+    def bookable_dates(self, now: datetime, closed: Collection[date] = ()) -> list[date]:
+        """Hoy (si se permite), los días hábiles cerrados intermedios (para avisar) y la fecha objetivo."""
+        today = now.date()
+        dates = [today] if self.allow_same_day and is_weekday(today) else []
+        target = self.target_date(now, closed)
+        day = next_weekday(today)
+        while day < target:
+            dates.append(day)  # sólo pueden ser días cerrados
+            day = next_weekday(day)
+        return dates + [target]

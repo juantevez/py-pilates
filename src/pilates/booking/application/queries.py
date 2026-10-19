@@ -14,6 +14,7 @@ from pilates.booking.application.dto import (
 )
 from pilates.booking.domain.model import ClassSnapshot, TurnoStatus
 from pilates.booking.domain.policy import BookingPolicy
+from pilates.scheduling.application.closures import closed_dates_from
 from pilates.scheduling.application.services import next_open_day
 from pilates.scheduling.domain.calendar import BookingCalendar
 from pilates.scheduling.domain.model import ClaseStatus
@@ -32,9 +33,12 @@ class GetAvailability:
     def execute(self, *, user_id: UUID) -> list[DayAvailabilityDTO]:
         now = self._clock.now()
         with self._uow() as uow:
-            return [self._day(uow, fecha, user_id, now) for fecha in self._calendar.bookable_dates(now)]
+            closed = closed_dates_from(uow, now.date())
+            return [self._day(uow, fecha, user_id, now, closed) for fecha in self._calendar.bookable_dates(now, closed)]
 
-    def _day(self, uow: UnitOfWork, fecha: date, user_id: UUID, now: datetime) -> DayAvailabilityDTO:
+    def _day(
+        self, uow: UnitOfWork, fecha: date, user_id: UUID, now: datetime, closed: frozenset[date]
+    ) -> DayAvailabilityDTO:
         if cierre := uow.cierres.get_by_date(fecha):
             return DayAvailabilityDTO(
                 fecha=fecha,
@@ -42,14 +46,14 @@ class GetAvailability:
                 motivo_cierre=cierre.descripcion,
                 proximo_dia_habil=next_open_day(uow, fecha),
             )
-        apertura = None if fecha == now.date() else self._calendar.opening_at(fecha, now)
+        apertura = None if fecha == now.date() else self._calendar.opening_at(fecha, now, closed)
         if apertura is not None and now < apertura:
             return DayAvailabilityDTO(fecha=fecha, estado="pendiente_apertura", apertura=apertura)
 
         rows = uow.booking_queries.grid_for_date(fecha, user_id)
         if not rows:
             return DayAvailabilityDTO(fecha=fecha, estado="sin_clases", apertura=apertura)
-        within_window = self._calendar.is_bookable_date(fecha, now)
+        within_window = self._calendar.is_bookable_date(fecha, now, closed)
         return DayAvailabilityDTO(
             fecha=fecha,
             estado="abierta",

@@ -5,6 +5,7 @@ from datetime import date, datetime, timedelta
 from uuid import UUID
 
 from pilates.booking.application.services import release_class_bookings
+from pilates.scheduling.application.closures import closed_dates_from
 from pilates.scheduling.application.dto import (
     AdminClassDTO,
     CalendarDayDTO,
@@ -77,12 +78,17 @@ class GenerateDailyClasses:
 
     def execute(self, *, fecha: date | None = None, notify: bool = False) -> GenerationResultDTO:
         now = self._clock.now()
-        fecha = fecha or self._calendar.target_date(now)
-        if not is_weekday(fecha):
-            raise BusinessRuleViolation("Sólo hay clases de lunes a viernes", code="not_a_weekday")
-        if fecha < now.date():
-            raise BusinessRuleViolation("No se pueden generar clases en el pasado", code="date_in_past")
         with self._uow() as uow:
+            closed = closed_dates_from(uow, now.date())
+            if fecha is None:
+                # Job nocturno: abre el próximo día hábil sin cierre. También corre en días cerrados;
+                # si la apertura de ese día ya fue en un día anterior, no se vuelve a avisar.
+                fecha = self._calendar.target_date(now, closed)
+                notify = notify and self._calendar.opening_at(fecha, now, closed).date() == now.date()
+            if not is_weekday(fecha):
+                raise BusinessRuleViolation("Sólo hay clases de lunes a viernes", code="not_a_weekday")
+            if fecha < now.date():
+                raise BusinessRuleViolation("No se pueden generar clases en el pasado", code="date_in_past")
             if cierre := uow.cierres.get_by_date(fecha):
                 if notify and self._notify_closed_day:
                     uow.add_event(
@@ -94,6 +100,8 @@ class GenerateDailyClasses:
                 )
             created, reopened = ensure_daily_grid(uow, self._grid, fecha)
             if notify:
+                if self._notify_closed_day:
+                    self._announce_skipped_closures(uow, now.date(), fecha)
                 uow.add_event(TurnosHabilitados(fecha=fecha))
             if reopened:
                 uow.add_event(ClasesReabiertas(clase_ids=tuple(reopened)))
@@ -101,6 +109,15 @@ class GenerateDailyClasses:
             return GenerationResultDTO(
                 fecha=fecha, estado="generada", clases_creadas=created, clases_reabiertas=len(reopened)
             )
+
+    @staticmethod
+    def _announce_skipped_closures(uow: UnitOfWork, hoy: date, fecha: date) -> None:
+        """Avisa los días hábiles cerrados que se saltearon entre hoy y la fecha que se abre."""
+        day = next_weekday(hoy)
+        while day < fecha:
+            if cierre := uow.cierres.get_by_date(day):
+                uow.add_event(DiaSinClases(fecha=day, motivo=cierre.descripcion, proximo_dia_habil=fecha))
+            day = next_weekday(day)
 
 
 class ListClassesForDate:
@@ -293,7 +310,9 @@ class DeleteCierre:
         uow.audit.record(admin_id, "closure.deleted", {"fecha": cierre.fecha.isoformat()})
         if cierre.fecha < now.date():
             return []
-        if uow.clases.list_by_date(cierre.fecha) or self._calendar.is_bookable_date(cierre.fecha, now):
+        if uow.clases.list_by_date(cierre.fecha) or self._calendar.is_bookable_date(
+            cierre.fecha, now, closed_dates_from(uow, now.date())
+        ):
             return ensure_daily_grid(uow, self._grid, cierre.fecha)[1]
         return []
 
