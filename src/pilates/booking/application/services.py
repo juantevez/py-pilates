@@ -68,13 +68,13 @@ class BookClass:
                 raise ConflictError("Ya tenés un turno en esta clase", code="already_booked")
 
             same_day = [
-                _get_class(uow, t.clase_id) for t in uow.turnos.list_active_by_user_on_date(user_id, clase.fecha)
+                _get_class(uow, t.clase_id) for t in uow.turnos.list_occupied_by_user_on_date(user_id, clase.fecha)
             ]
             self._policy.ensure_can_book(
                 now=now,
                 clase=clase,
                 within_booking_window=self._calendar.is_bookable_date(clase.fecha, now),
-                active_bookings=uow.turnos.count_active(clase_id),
+                active_bookings=uow.turnos.count_occupied(clase_id),
                 user_bookings_same_day=same_day,
             )
 
@@ -112,7 +112,7 @@ class AdminBookClass:
             if existing is not None and existing.is_active:
                 raise ConflictError("El alumno ya tiene un turno en esta clase", code="already_booked")
             self._policy.ensure_admin_can_book(
-                now=now, clase=clase, active_bookings=uow.turnos.count_active(clase_id)
+                now=now, clase=clase, active_bookings=uow.turnos.count_occupied(clase_id)
             )
 
             if existing is not None:
@@ -170,7 +170,7 @@ class JoinWaitlist:
                 now=now,
                 clase=clase,
                 within_booking_window=self._calendar.is_bookable_date(clase.fecha, now),
-                active_bookings=uow.turnos.count_active(clase_id),
+                active_bookings=uow.turnos.count_occupied(clase_id),
             )
             uow.waitlist.add(WaitlistEntry(user_id=user_id, clase_id=clase_id, created_at=now))
             uow.commit()

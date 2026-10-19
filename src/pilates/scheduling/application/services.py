@@ -124,7 +124,7 @@ class UpdateClase:
             if clase is None:
                 raise NotFoundError("Clase inexistente")
             if max_capacity is not None:
-                clase.change_capacity(max_capacity, uow.turnos.count_active(clase_id))
+                clase.change_capacity(max_capacity, uow.turnos.count_occupied(clase_id))
             if instructor_name is not None:
                 clase.assign_instructor(instructor_name)
             uow.clases.save(clase)

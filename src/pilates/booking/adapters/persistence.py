@@ -16,6 +16,8 @@ from pilates.scheduling.domain.model import ClaseStatus
 from pilates.shared.application.unit_of_work import UnitOfWork
 
 _ACTIVE = TurnoStatus.CONFIRMADA
+# Un turno con asistencia ya marcada sigue ocupando su lugar en la clase.
+_OCCUPYING = (TurnoStatus.CONFIRMADA, TurnoStatus.ASISTIO, TurnoStatus.NO_ASISTIO)
 
 
 def _turno_to_domain(m: TurnoModel) -> Turno:
@@ -77,9 +79,9 @@ class SqlTurnoRepository(TurnoRepository):
         ).scalar_one_or_none()
         return _turno_to_domain(m) if m else None
 
-    def count_active(self, clase_id: UUID) -> int:
+    def count_occupied(self, clase_id: UUID) -> int:
         return self._s.execute(
-            select(func.count(TurnoModel.id)).where(TurnoModel.clase_id == clase_id, TurnoModel.status == _ACTIVE)
+            select(func.count(TurnoModel.id)).where(TurnoModel.clase_id == clase_id, TurnoModel.status.in_(_OCCUPYING))
         ).scalar_one()
 
     def list_active_by_clase(self, clase_id: UUID) -> list[Turno]:
@@ -94,11 +96,11 @@ class SqlTurnoRepository(TurnoRepository):
             )
         )
 
-    def list_active_by_user_on_date(self, user_id: UUID, fecha: date) -> list[Turno]:
+    def list_occupied_by_user_on_date(self, user_id: UUID, fecha: date) -> list[Turno]:
         return self._many(
             select(TurnoModel)
             .join(ClaseModel, ClaseModel.id == TurnoModel.clase_id)
-            .where(TurnoModel.user_id == user_id, TurnoModel.status == _ACTIVE, ClaseModel.fecha == fecha)
+            .where(TurnoModel.user_id == user_id, TurnoModel.status.in_(_OCCUPYING), ClaseModel.fecha == fecha)
         )
 
     def list_active_by_user_from(self, user_id: UUID, desde: datetime) -> list[Turno]:
@@ -205,7 +207,7 @@ class SqlBookingQueries(BookingQueries):
         booked = dict(
             self._s.execute(
                 select(TurnoModel.clase_id, func.count(TurnoModel.id))
-                .where(TurnoModel.clase_id.in_(ids), TurnoModel.status == _ACTIVE)
+                .where(TurnoModel.clase_id.in_(ids), TurnoModel.status.in_(_OCCUPYING))
                 .group_by(TurnoModel.clase_id)
             ).all()
         )

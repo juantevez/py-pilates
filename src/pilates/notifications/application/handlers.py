@@ -56,7 +56,7 @@ class NotificationHandlers:
             # Aviso de liberación a la lista de espera (gana el primero que reserva).
             if not clase.is_active or clase.starts_at(now.tzinfo) <= now:
                 return
-            if uow.turnos.count_active(clase.id) >= clase.max_capacity:
+            if uow.turnos.count_occupied(clase.id) >= clase.max_capacity:
                 return
             url = f"{self._frontend_url}/clases/{clase.id}"
             for entry in uow.waitlist.list_by_clase(clase.id):

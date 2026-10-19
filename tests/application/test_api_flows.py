@@ -416,3 +416,39 @@ def test_reactivated_class_only_notifies_bookings_cancelled_with_class(api: Api,
     outbox.outbox.clear()
     assert api.client.post(f"/admin/clases/{ids['10:00']}/reactivar", headers=admin).status_code == 204
     assert [m.to for m in outbox.outbox if "Vuelve la clase" in m.subject] == ["bea@test.com"]
+
+
+def test_marked_attendance_still_takes_a_spot(api: Api, clock: FixedClock):
+    admin = api.user("admin@test.com", role=Role.ADMIN)
+    ids = open_tuesday(api, admin)
+    students = [api.user(f"a{i}@test.com", f"Alumno {i}") for i in range(4)]
+    turnos = [api.client.post("/turnos", json={"clase_id": ids["16:00"]}, headers=h).json()["id"] for h in students]
+
+    # Clase en curso: el admin marca asistencia y ausencia; esos lugares siguen ocupados.
+    clock.set(2026, 10, 13, 16, 15)
+    api.client.post(f"/admin/turnos/{turnos[0]}/asistencia", json={"asistio": True}, headers=admin)
+    api.client.post(f"/admin/turnos/{turnos[1]}/asistencia", json={"asistio": False}, headers=admin)
+    extra = api.client.get("/auth/me", headers=api.user("extra@test.com")).json()["id"]
+    r = api.client.post("/admin/turnos", json={"user_id": extra, "clase_id": ids["16:00"]}, headers=admin)
+    assert r.status_code == 409 and r.json()["error"] == "class_full"
+
+    nine = next(c for c in api.client.get("/admin/clases", params={"fecha": TUESDAY}, headers=admin).json() if c["id"] == ids["16:00"])
+    assert nine["reservados"] == 4
+    r = api.client.patch(f"/admin/clases/{ids['16:00']}", json={"max_capacity": 3}, headers=admin)
+    assert r.json()["error"] == "capacity_below_bookings"
+
+
+def test_marked_attendance_still_counts_for_daily_limits(api: Api, clock: FixedClock):
+    admin = api.user("admin@test.com", role=Role.ADMIN)
+    ids = open_tuesday(api, admin)
+    h = api.user("ana@test.com")
+    turno = api.client.post("/turnos", json={"clase_id": ids["08:00"]}, headers=h).json()["id"]
+
+    # Mismo día, con la clase de las 08:00 en curso y la asistencia ya marcada.
+    clock.set(2026, 10, 13, 8, 30)
+    api.client.post(f"/admin/turnos/{turno}/asistencia", json={"asistio": True}, headers=admin)
+    r = api.client.post("/turnos", json={"clase_id": ids["10:00"]}, headers=h)
+    assert r.json()["error"] == "block_limit_reached"
+    assert api.client.post("/turnos", json={"clase_id": ids["15:00"]}, headers=h).status_code == 201
+    r = api.client.post("/turnos", json={"clase_id": ids["16:00"]}, headers=h)
+    assert r.json()["error"] == "daily_limit_reached"
