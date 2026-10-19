@@ -88,3 +88,12 @@ def reset_password(nombre: str, url: str, minutos: int) -> tuple[str, str]:
         f"(válido por {minutos} minutos, de un solo uso):\n{url}\n\n"
         "Si no fuiste vos, ignorá este correo." + _FIRMA,
     )
+
+
+def bienvenida(nombre: str, url: str, horas: int) -> tuple[str, str]:
+    return (
+        "Bienvenido/a al estudio de Pilates",
+        f"Hola {nombre},\n\nEl estudio te creó una cuenta para reservar tus clases. Para empezar, "
+        f"definí tu contraseña con este enlace (válido por {horas} horas, de un solo uso):\n{url}\n\n"
+        "Si el enlace venció, podés pedir uno nuevo desde \"Olvidé mi contraseña\"." + _FIRMA,
+    )

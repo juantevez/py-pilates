@@ -6,7 +6,7 @@ from uuid import UUID
 
 from pilates.identity.application.dto import AuthResult, UserDTO, UserSummary
 from pilates.identity.application.ports import PasswordHasher, SecretTokenGenerator, TokenService
-from pilates.identity.domain.events import PasswordResetRequested
+from pilates.identity.domain.events import PasswordResetRequested, UserInvited
 from pilates.identity.domain.model import Email, PasswordResetToken, Role, User
 from pilates.shared.application.ports import Clock
 from pilates.shared.application.unit_of_work import UnitOfWork
@@ -58,6 +58,45 @@ class RegisterUser:
                 role=role,
             )
             uow.users.add(user)
+            uow.commit()
+            return to_dto(user)
+
+
+class CreateUserByAdmin:
+    """Alta de un alumno por el gimnasio: contraseña aleatoria + enlace para que defina la suya."""
+
+    def __init__(
+        self,
+        uow: UowFactory,
+        hasher: PasswordHasher,
+        tokens: SecretTokenGenerator,
+        clock: Clock,
+        set_password_url_template: str,
+        ttl: timedelta,
+    ) -> None:
+        self._uow, self._hasher, self._tokens, self._clock = uow, hasher, tokens, clock
+        self._url_template, self._ttl = set_password_url_template, ttl
+
+    def execute(self, *, admin_id: UUID, email: str, full_name: str) -> UserDTO:
+        email_vo = Email(email)
+        now = self._clock.now()
+        with self._uow() as uow:
+            if uow.users.get_by_email(email_vo):
+                raise ConflictError("Ya existe un usuario con ese email", code="email_taken")
+            user = User.register(
+                email=email_vo,
+                full_name=full_name,
+                password_hash=self._hasher.hash(self._tokens.generate()),
+                now=now,
+            )
+            uow.users.add(user)
+            raw = self._tokens.generate()
+            token = PasswordResetToken(
+                user_id=user.id, token_hash=self._tokens.hash(raw), expires_at=now + self._ttl, created_at=now
+            )
+            token.record(UserInvited(user_id=user.id, set_password_url=self._url_template.format(token=raw)))
+            uow.reset_tokens.add(token)
+            uow.audit.record(admin_id, "user.created_by_admin", {"user_id": str(user.id)})
             uow.commit()
             return to_dto(user)
 

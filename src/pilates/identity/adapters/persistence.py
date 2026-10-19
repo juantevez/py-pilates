@@ -45,6 +45,7 @@ class SqlUserRepository(UserRepository):
 
     def add(self, user: User) -> None:
         self._s.add(_user_to_model(user))
+        self._s.flush()  # sin relationship() el orden de INSERT no está garantizado (FK de reset tokens)
         self._uow.track(user)
 
     def save(self, user: User) -> None:

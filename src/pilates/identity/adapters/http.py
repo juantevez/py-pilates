@@ -36,6 +36,11 @@ class ResetPasswordRequest(BaseModel):
     new_password: str = Field(min_length=8, max_length=128)
 
 
+class CreateUserRequest(BaseModel):
+    email: EmailStr
+    full_name: str = Field(min_length=1, max_length=200)
+
+
 class BlockRequest(BaseModel):
     motivo: str = Field(default="", max_length=500)
 
@@ -77,6 +82,12 @@ def list_users(
     offset: int = 0,
 ):
     return c.list_users.execute(search=search, status=estado, limit=limit, offset=offset)
+
+
+@admin_router.post("", status_code=status.HTTP_201_CREATED, response_model=UserDTO)
+def create_user(body: CreateUserRequest, c: ContainerDep, admin: AdminUser):
+    """Alta de un alumno por el gimnasio; recibe un email para definir su contraseña."""
+    return c.create_user_by_admin.execute(admin_id=admin.id, email=body.email, full_name=body.full_name)
 
 
 @admin_router.post("/{user_id}/bloquear", response_model=UserDTO)

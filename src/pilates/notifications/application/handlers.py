@@ -6,7 +6,7 @@ from datetime import timedelta
 
 from pilates.booking.domain.events import TurnoCancelado, TurnoReservado
 from pilates.booking.domain.model import CanceladoPor
-from pilates.identity.domain.events import PasswordResetRequested
+from pilates.identity.domain.events import PasswordResetRequested, UserInvited
 from pilates.notifications.application import templates
 from pilates.notifications.application.ports import EmailMessage, EmailSender
 from pilates.scheduling.domain.events import ClasesReabiertas, DiaSinClases, TurnosHabilitados
@@ -21,11 +21,18 @@ class NotificationHandlers:
     """Reacciona a eventos de dominio enviando correos."""
 
     def __init__(
-        self, uow: UowFactory, sender: EmailSender, clock: Clock, frontend_url: str, reset_ttl_minutes: int
+        self,
+        uow: UowFactory,
+        sender: EmailSender,
+        clock: Clock,
+        frontend_url: str,
+        reset_ttl_minutes: int,
+        invite_ttl_hours: int,
     ) -> None:
         self._uow, self._sender, self._clock = uow, sender, clock
         self._frontend_url = frontend_url.rstrip("/")
         self._reset_ttl_minutes = reset_ttl_minutes
+        self._invite_ttl_hours = invite_ttl_hours
 
     def _send(self, to: str, content: tuple[str, str]) -> None:
         subject, body = content
@@ -99,6 +106,12 @@ class NotificationHandlers:
             user = uow.users.get(event.user_id)
         if user:
             self._send(str(user.email), templates.reset_password(user.full_name, event.reset_url, self._reset_ttl_minutes))
+
+    def on_user_invited(self, event: UserInvited) -> None:
+        with self._uow() as uow:
+            user = uow.users.get(event.user_id)
+        if user:
+            self._send(str(user.email), templates.bienvenida(user.full_name, event.set_password_url, self._invite_ttl_hours))
 
 
 class SendClassReminders:
