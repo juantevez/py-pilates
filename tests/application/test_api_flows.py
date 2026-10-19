@@ -368,3 +368,51 @@ def test_admin_books_for_student_only_capacity_applies(api: Api, clock: FixedClo
 
     mine = api.client.get("/turnos/mios", headers=h).json()
     assert len(mine["proximas"]) + len(mine["pasadas"]) == 3
+
+
+def test_admin_cancels_single_booking(api: Api, clock: FixedClock, outbox):
+    admin = api.user("admin@test.com", role=Role.ADMIN)
+    ids = open_tuesday(api, admin)
+    ana, bea, cami = api.user("ana@test.com", "Ana"), api.user("bea@test.com", "Bea"), api.user("cami@test.com", "Cami")
+    turno = api.client.post("/turnos", json={"clase_id": ids["10:00"]}, headers=ana).json()
+    for i in range(3):
+        assert api.client.post("/turnos", json={"clase_id": ids["10:00"]}, headers=api.user(f"x{i}@test.com")).status_code == 201
+    assert api.client.post(f"/clases/{ids['10:00']}/lista-espera", headers=cami).status_code == 201
+
+    assert api.client.post(f"/admin/turnos/{turno['id']}/cancelar", json={}, headers=ana).status_code == 403
+
+    # Sin ventana de anticipación: a las 09:30 el alumno ya no podría cancelar la de las 10:00.
+    clock.set(2026, 10, 13, 9, 30)
+    outbox.outbox.clear()
+    r = api.client.post(f"/admin/turnos/{turno['id']}/cancelar", json={"motivo": "Pidió cambio"}, headers=admin)
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "cancelada_por_admin"
+    to_ana = [m for m in outbox.outbox if m.to == "ana@test.com"]
+    assert [m.subject for m in to_ana] == ["Turno cancelado: martes 13 de octubre 10:00 hs"]
+    assert "Pidió cambio" in to_ana[0].body
+    assert [m.to for m in outbox.outbox if "liberó" in m.subject] == ["cami@test.com"]
+
+    again = api.client.post(f"/admin/turnos/{turno['id']}/cancelar", json={}, headers=admin)
+    assert again.json()["error"] == "booking_not_active"
+    mine = api.client.get("/turnos/mios", headers=ana).json()
+    assert mine["proximas"][0]["status"] == "cancelada_por_admin"
+
+    # Una clase terminada no se toca.
+    other = api.client.post("/turnos", json={"clase_id": ids["11:00"]}, headers=bea).json()
+    clock.set(2026, 10, 13, 12, 0)
+    r = api.client.post(f"/admin/turnos/{other['id']}/cancelar", json={}, headers=admin)
+    assert r.json()["error"] == "class_finished"
+
+
+def test_reactivated_class_only_notifies_bookings_cancelled_with_class(api: Api, outbox):
+    admin = api.user("admin@test.com", role=Role.ADMIN)
+    ids = open_tuesday(api, admin)
+    ana, bea = api.user("ana@test.com", "Ana"), api.user("bea@test.com", "Bea")
+    turno_ana = api.client.post("/turnos", json={"clase_id": ids["10:00"]}, headers=ana).json()
+    api.client.post("/turnos", json={"clase_id": ids["10:00"]}, headers=bea)
+
+    api.client.post(f"/admin/turnos/{turno_ana['id']}/cancelar", json={}, headers=admin)
+    api.client.post(f"/admin/clases/{ids['10:00']}/cancelar", json={"motivo": "gripe"}, headers=admin)
+    outbox.outbox.clear()
+    assert api.client.post(f"/admin/clases/{ids['10:00']}/reactivar", headers=admin).status_code == 204
+    assert [m.to for m in outbox.outbox if "Vuelve la clase" in m.subject] == ["bea@test.com"]

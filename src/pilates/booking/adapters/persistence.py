@@ -22,7 +22,7 @@ def _turno_to_domain(m: TurnoModel) -> Turno:
     return Turno(
         id=m.id, user_id=m.user_id, clase_id=m.clase_id, status=m.status, booked_at=m.booked_at,
         cancelled_at=m.cancelled_at, cancel_reason=m.cancel_reason, attendance_marked_at=m.attendance_marked_at,
-        reminder_sent_at=m.reminder_sent_at, booked_by=m.booked_by,
+        reminder_sent_at=m.reminder_sent_at, booked_by=m.booked_by, cancelled_with_class=m.cancelled_with_class,
     )
 
 
@@ -30,7 +30,7 @@ def _turno_to_model(t: Turno) -> TurnoModel:
     return TurnoModel(
         id=t.id, user_id=t.user_id, clase_id=t.clase_id, status=t.status, booked_at=t.booked_at,
         cancelled_at=t.cancelled_at, cancel_reason=t.cancel_reason, attendance_marked_at=t.attendance_marked_at,
-        reminder_sent_at=t.reminder_sent_at, booked_by=t.booked_by,
+        reminder_sent_at=t.reminder_sent_at, booked_by=t.booked_by, cancelled_with_class=t.cancelled_with_class,
     )
 
 
@@ -85,10 +85,12 @@ class SqlTurnoRepository(TurnoRepository):
     def list_active_by_clase(self, clase_id: UUID) -> list[Turno]:
         return self._many(select(TurnoModel).where(TurnoModel.clase_id == clase_id, TurnoModel.status == _ACTIVE))
 
-    def list_cancelled_by_gym(self, clase_id: UUID) -> list[Turno]:
+    def list_cancelled_with_class(self, clase_id: UUID) -> list[Turno]:
         return self._many(
             select(TurnoModel).where(
-                TurnoModel.clase_id == clase_id, TurnoModel.status == TurnoStatus.CANCELADA_POR_ADMIN
+                TurnoModel.clase_id == clase_id,
+                TurnoModel.status == TurnoStatus.CANCELADA_POR_ADMIN,
+                TurnoModel.cancelled_with_class.is_(True),
             )
         )
 

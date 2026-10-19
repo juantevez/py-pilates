@@ -42,7 +42,7 @@ def release_class_bookings(uow: UnitOfWork, *, clase_id: UUID, motivo: str, now)
     """
     turnos = uow.turnos.list_active_by_clase(clase_id)
     for turno in turnos:
-        turno.cancel_by_gym(now=now, motivo=motivo)
+        turno.cancel_with_class(now=now, motivo=motivo)
         uow.turnos.save(turno)
     uow.waitlist.delete_by_clase(clase_id)
     return len(turnos)
@@ -187,6 +187,26 @@ class LeaveWaitlist:
                 raise NotFoundError("No estás en la lista de espera de esta clase")
             uow.waitlist.delete(entry)
             uow.commit()
+
+
+class AdminCancelBooking:
+    """El gimnasio cancela un turno puntual: libera el cupo y avisa al alumno y a la lista de espera."""
+
+    def __init__(self, uow: UowFactory, clock: Clock) -> None:
+        self._uow, self._clock = uow, clock
+
+    def execute(self, *, admin_id: UUID, turno_id: UUID, motivo: str | None) -> TurnoDTO:
+        now = self._clock.now()
+        with self._uow() as uow:
+            turno = uow.turnos.get(turno_id)
+            if turno is None:
+                raise NotFoundError("Turno inexistente")
+            clase = _get_class(uow, turno.clase_id, for_update=True)
+            turno.cancel_by_admin(now=now, class_ends_at=clase.ends_at, motivo=motivo)
+            uow.turnos.save(turno)
+            uow.audit.record(admin_id, "booking.cancelled_by_admin", {"turno_id": str(turno_id), "motivo": motivo})
+            uow.commit()
+            return to_dto(turno)
 
 
 class MarkAttendance:

@@ -44,6 +44,15 @@ def cancelacion_gimnasio(nombre: str, fecha: date, inicio: time, motivo: str | N
     )
 
 
+def turno_cancelado_gimnasio(nombre: str, fecha: date, inicio: time, motivo: str | None) -> tuple[str, str]:
+    motivo_txt = f" Motivo: {motivo}." if motivo else ""
+    return (
+        f"Turno cancelado: {fecha_larga(fecha)} {hora(inicio)} hs",
+        f"Hola {nombre},\n\nEl estudio canceló tu turno para la clase del {fecha_larga(fecha)} a las "
+        f"{hora(inicio)} hs.{motivo_txt} Si querés, podés reservar otro turno desde la app." + _FIRMA,
+    )
+
+
 def lugar_liberado(nombre: str, fecha: date, inicio: time, url: str) -> tuple[str, str]:
     return (
         f"¡Se liberó un lugar! {fecha_larga(fecha)} {hora(inicio)} hs",

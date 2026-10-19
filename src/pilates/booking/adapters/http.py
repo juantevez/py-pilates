@@ -2,7 +2,7 @@ from datetime import date
 from uuid import UUID
 
 from fastapi import APIRouter, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from pilates.booking.application.dto import (
     AttendanceClassDTO,
@@ -23,6 +23,10 @@ class BookRequest(BaseModel):
 class AdminBookRequest(BaseModel):
     user_id: UUID
     clase_id: UUID
+
+
+class AdminCancelRequest(BaseModel):
+    motivo: str = Field(default="", max_length=500)
 
 
 class AttendanceRequest(BaseModel):
@@ -70,6 +74,12 @@ def attendance(c: ContainerDep, _: AdminUser, fecha: date | None = None):
 def admin_book(body: AdminBookRequest, c: ContainerDep, admin: AdminUser):
     """Reserva en nombre de un alumno: valida el cupo y que la clase no haya terminado (sin ventana ni límites)."""
     return c.admin_book_class.execute(admin_id=admin.id, user_id=body.user_id, clase_id=body.clase_id)
+
+
+@admin_router.post("/turnos/{turno_id}/cancelar", response_model=TurnoDTO)
+def admin_cancel(turno_id: UUID, body: AdminCancelRequest, c: ContainerDep, admin: AdminUser):
+    """Cancela un turno puntual sin ventana de anticipación (no en clases terminadas); avisa al alumno."""
+    return c.admin_cancel_booking.execute(admin_id=admin.id, turno_id=turno_id, motivo=body.motivo.strip() or None)
 
 
 @admin_router.post("/turnos/{turno_id}/asistencia", response_model=TurnoDTO)

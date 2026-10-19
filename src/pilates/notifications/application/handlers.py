@@ -51,10 +51,8 @@ class NotificationHandlers:
             if clase is None:
                 return
             if event.por == CanceladoPor.GIMNASIO.value and (user := uow.users.get(event.user_id)):
-                self._send(
-                    str(user.email),
-                    templates.cancelacion_gimnasio(user.full_name, clase.fecha, clase.start_time, event.motivo),
-                )
+                template = templates.cancelacion_gimnasio if event.con_clase else templates.turno_cancelado_gimnasio
+                self._send(str(user.email), template(user.full_name, clase.fecha, clase.start_time, event.motivo))
             # Aviso de liberación a la lista de espera (gana el primero que reserva).
             if not clase.is_active or clase.starts_at(now.tzinfo) <= now:
                 return
@@ -79,7 +77,7 @@ class NotificationHandlers:
                 clase = uow.clases.get(clase_id)
                 if clase is None or not clase.is_active or clase.starts_at(now.tzinfo) <= now:
                     continue
-                for turno in uow.turnos.list_cancelled_by_gym(clase_id):
+                for turno in uow.turnos.list_cancelled_with_class(clase_id):
                     per_user.setdefault(turno.user_id, []).append((clase.fecha, clase.start_time))
             url = f"{self._frontend_url}/reservar"
             for user_id, clases in per_user.items():
