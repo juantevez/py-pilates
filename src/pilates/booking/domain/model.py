@@ -35,6 +35,7 @@ class ClassSnapshot:
     id: UUID
     fecha: date
     starts_at: datetime
+    ends_at: datetime
     bloque: str
     capacity: int
     is_active: bool

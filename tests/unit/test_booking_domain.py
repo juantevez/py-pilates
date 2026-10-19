@@ -17,7 +17,8 @@ POLICY = BookingPolicy(max_per_day=2, max_per_block=1, min_advance=timedelta(0),
 def snapshot(hour=9, bloque="manana", capacity=4, active=True) -> ClassSnapshot:
     fecha = date(2026, 10, 13)
     return ClassSnapshot(
-        id=uuid4(), fecha=fecha, starts_at=datetime(2026, 10, 13, hour, tzinfo=TZ), bloque=bloque,
+        id=uuid4(), fecha=fecha, starts_at=datetime(2026, 10, 13, hour, tzinfo=TZ),
+        ends_at=datetime(2026, 10, 13, hour + 1, tzinfo=TZ), bloque=bloque,
         capacity=capacity, is_active=active,
     )
 
@@ -108,3 +109,15 @@ def test_clase_reactivation_rules():
     with pytest.raises(BusinessRuleViolation) as e:
         clase.reactivate()
     assert e.value.code == "class_closed_by_closure"
+
+
+def test_admin_booking_only_checks_capacity_and_class_not_finished():
+    clase = snapshot(hour=9)
+    # Fuera de ventana y con la clase en curso: el gimnasio igual puede reservar.
+    POLICY.ensure_admin_can_book(now=datetime(2026, 10, 13, 9, 30, tzinfo=TZ), clase=clase, active_bookings=3)
+    with pytest.raises(ConflictError) as e:
+        POLICY.ensure_admin_can_book(now=NOW, clase=clase, active_bookings=4)
+    assert e.value.code == "class_full"
+    with pytest.raises(BusinessRuleViolation) as e:
+        POLICY.ensure_admin_can_book(now=datetime(2026, 10, 13, 10, 0, tzinfo=TZ), clase=clase, active_bookings=0)
+    assert e.value.code == "class_finished"

@@ -68,7 +68,7 @@ def attendance(c: ContainerDep, _: AdminUser, fecha: date | None = None):
 
 @admin_router.post("/turnos", status_code=status.HTTP_201_CREATED, response_model=TurnoDTO)
 def admin_book(body: AdminBookRequest, c: ContainerDep, admin: AdminUser):
-    """Reserva en nombre de un alumno: sólo valida el cupo (sin ventana ni límites por día/bloque)."""
+    """Reserva en nombre de un alumno: valida el cupo y que la clase no haya terminado (sin ventana ni límites)."""
     return c.admin_book_class.execute(admin_id=admin.id, user_id=body.user_id, clase_id=body.clase_id)
 
 

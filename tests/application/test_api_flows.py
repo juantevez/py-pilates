@@ -351,15 +351,17 @@ def test_admin_books_for_student_only_capacity_applies(api: Api, clock: FixedClo
     assert api.client.post("/turnos", json={"clase_id": wed}, headers=h).json()["error"] == "outside_booking_window"
     assert api.client.post("/admin/turnos", json={"user_id": ana, "clase_id": wed}, headers=admin).status_code == 201
 
-    # Saltea el cierre de reservas de una clase que ya empezó.
+    # Saltea el cierre de reservas de una clase en curso, pero no la de una que ya terminó.
     clock.set(2026, 10, 13, 15, 30)
     bea = api.client.get("/auth/me", headers=api.user("bea@test.com")).json()["id"]
     assert api.client.post("/admin/turnos", json={"user_id": bea, "clase_id": ids["15:00"]}, headers=admin).status_code == 201
+    r = api.client.post("/admin/turnos", json={"user_id": bea, "clase_id": ids["11:00"]}, headers=admin)
+    assert r.status_code == 422 and r.json()["error"] == "class_finished"
 
-    # El cupo sí se respeta: la 10:00 tiene 4 lugares.
+    # El cupo sí se respeta: la 16:00 tiene 4 lugares.
     others = [api.client.get("/auth/me", headers=api.user(f"x{i}@test.com")).json()["id"] for i in range(5)]
     codes = [
-        api.client.post("/admin/turnos", json={"user_id": u, "clase_id": ids["10:00"]}, headers=admin).status_code
+        api.client.post("/admin/turnos", json={"user_id": u, "clase_id": ids["16:00"]}, headers=admin).status_code
         for u in others
     ]
     assert codes == [201, 201, 201, 201, 409]

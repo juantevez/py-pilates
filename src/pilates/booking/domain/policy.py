@@ -38,10 +38,13 @@ class BookingPolicy:
                 code="block_limit_reached",
             )
 
-    def ensure_admin_can_book(self, *, clase: ClassSnapshot, active_bookings: int) -> None:
-        """El gimnasio reserva por un alumno salteando ventana, anticipación y límites: sólo respeta el cupo."""
+    def ensure_admin_can_book(self, *, now: datetime, clase: ClassSnapshot, active_bookings: int) -> None:
+        """El gimnasio reserva por un alumno salteando ventana, anticipación y límites: respeta el cupo
+        y que la clase no haya terminado (puede anotar a alguien en una clase en curso)."""
         if not clase.is_active:
             raise BusinessRuleViolation("La clase no está disponible", code="class_not_available")
+        if now >= clase.ends_at:
+            raise BusinessRuleViolation("La clase ya terminó", code="class_finished")
         self._ensure_has_capacity(clase, active_bookings)
 
     def ensure_can_join_waitlist(

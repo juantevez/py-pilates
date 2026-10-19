@@ -63,6 +63,7 @@ class GetAvailability:
             id=row.clase_id,
             fecha=row.fecha,
             starts_at=starts_at,
+            ends_at=datetime.combine(row.fecha, row.end_time, tzinfo=now.tzinfo),
             bloque=row.bloque,
             capacity=row.capacidad,
             is_active=row.status == ClaseStatus.ACTIVA.value,
