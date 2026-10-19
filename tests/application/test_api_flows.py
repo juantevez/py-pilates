@@ -305,3 +305,64 @@ def test_reopen_vacation_range(api: Api, clock: FixedClock, outbox):
 
     empty = api.client.request("DELETE", "/admin/cierres", params={"desde": TUESDAY, "hasta": "2026-10-16"}, headers=admin)
     assert empty.status_code == 404
+
+
+def test_admin_creates_user_who_sets_password(api: Api, outbox):
+    admin = api.user("admin@test.com", role=Role.ADMIN)
+    student = api.user("ana@test.com")
+    body = {"email": "nueva@test.com", "full_name": "Nueva Alumna"}
+    assert api.client.post("/admin/usuarios", json=body, headers=student).status_code == 403
+
+    r = api.client.post("/admin/usuarios", json=body, headers=admin)
+    assert r.status_code == 201, r.text
+    assert r.json()["role"] == "alumno" and r.json()["status"] == "activo"
+    assert api.client.post("/admin/usuarios", json=body, headers=admin).json()["error"] == "email_taken"
+
+    mail = next(m for m in outbox.outbox if m.to == "nueva@test.com")
+    assert "Bienvenido" in mail.subject
+    token = mail.body.split("token=")[1].split()[0]
+    r = api.client.post("/auth/reset-password", json={"token": token, "new_password": "mi-clave-1"})
+    assert r.status_code == 204
+    login = api.client.post("/auth/login", json={"email": "nueva@test.com", "password": "mi-clave-1"})
+    assert login.status_code == 200
+
+
+def test_admin_books_for_student_only_capacity_applies(api: Api, clock: FixedClock, outbox):
+    admin = api.user("admin@test.com", role=Role.ADMIN)
+    ids = open_tuesday(api, admin)
+    h = api.user("ana@test.com", "Ana")
+    ana = api.client.get("/auth/me", headers=h).json()["id"]
+    assert api.client.post("/admin/turnos", json={"user_id": ana, "clase_id": ids["08:00"]}, headers=h).status_code == 403
+
+    # Saltea el límite por bloque (08:00 y 09:00 son ambas de la mañana) y avisa al alumno.
+    outbox.outbox.clear()
+    for hora in ("08:00", "09:00"):
+        r = api.client.post("/admin/turnos", json={"user_id": ana, "clase_id": ids[hora]}, headers=admin)
+        assert r.status_code == 201, r.text
+        assert r.json()["booked_by"] == "gimnasio"
+    assert [m.to for m in outbox.outbox if "Reserva confirmada" in m.subject] == ["ana@test.com", "ana@test.com"]
+    dup = api.client.post("/admin/turnos", json={"user_id": ana, "clase_id": ids["08:00"]}, headers=admin)
+    assert dup.json()["error"] == "already_booked"
+
+    # Saltea la ventana de reserva: el miércoles todavía no abrió para los alumnos.
+    r = api.client.post("/admin/clases/generar", json={"fecha": "2026-10-14"}, headers=admin)
+    assert r.status_code == 200, r.text
+    wed = api.client.get("/admin/clases", params={"fecha": "2026-10-14"}, headers=admin).json()[0]["id"]
+    assert api.client.post("/turnos", json={"clase_id": wed}, headers=h).json()["error"] == "outside_booking_window"
+    assert api.client.post("/admin/turnos", json={"user_id": ana, "clase_id": wed}, headers=admin).status_code == 201
+
+    # Saltea el cierre de reservas de una clase que ya empezó.
+    clock.set(2026, 10, 13, 15, 30)
+    bea = api.client.get("/auth/me", headers=api.user("bea@test.com")).json()["id"]
+    assert api.client.post("/admin/turnos", json={"user_id": bea, "clase_id": ids["15:00"]}, headers=admin).status_code == 201
+
+    # El cupo sí se respeta: la 10:00 tiene 4 lugares.
+    others = [api.client.get("/auth/me", headers=api.user(f"x{i}@test.com")).json()["id"] for i in range(5)]
+    codes = [
+        api.client.post("/admin/turnos", json={"user_id": u, "clase_id": ids["10:00"]}, headers=admin).status_code
+        for u in others
+    ]
+    assert codes == [201, 201, 201, 201, 409]
+
+    mine = api.client.get("/turnos/mios", headers=h).json()
+    assert len(mine["proximas"]) + len(mine["pasadas"]) == 3

@@ -22,7 +22,7 @@ def _turno_to_domain(m: TurnoModel) -> Turno:
     return Turno(
         id=m.id, user_id=m.user_id, clase_id=m.clase_id, status=m.status, booked_at=m.booked_at,
         cancelled_at=m.cancelled_at, cancel_reason=m.cancel_reason, attendance_marked_at=m.attendance_marked_at,
-        reminder_sent_at=m.reminder_sent_at,
+        reminder_sent_at=m.reminder_sent_at, booked_by=m.booked_by,
     )
 
 
@@ -30,7 +30,7 @@ def _turno_to_model(t: Turno) -> TurnoModel:
     return TurnoModel(
         id=t.id, user_id=t.user_id, clase_id=t.clase_id, status=t.status, booked_at=t.booked_at,
         cancelled_at=t.cancelled_at, cancel_reason=t.cancel_reason, attendance_marked_at=t.attendance_marked_at,
-        reminder_sent_at=t.reminder_sent_at,
+        reminder_sent_at=t.reminder_sent_at, booked_by=t.booked_by,
     )
 
 

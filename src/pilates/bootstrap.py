@@ -11,6 +11,7 @@ from sqlalchemy.engine import Engine
 
 from pilates.booking.application.queries import GetAttendanceSheet, GetAvailability, GetMyBookings
 from pilates.booking.application.services import (
+    AdminBookClass,
     BookClass,
     CancelBooking,
     CancelUpcomingBookingsOfBlockedUser,
@@ -23,7 +24,7 @@ from pilates.booking.domain.policy import BookingPolicy
 from pilates.config import Settings
 from pilates.identity.adapters.security import BcryptPasswordHasher, JwtTokenService, Sha256SecretTokenGenerator
 from pilates.identity.application import services as identity
-from pilates.identity.domain.events import PasswordResetRequested, UserBlocked
+from pilates.identity.domain.events import PasswordResetRequested, UserBlocked, UserInvited
 from pilates.notifications.adapters.email import ConsoleEmailSender, SmtpEmailSender
 from pilates.notifications.application.handlers import NotificationHandlers, SendClassReminders
 from pilates.notifications.application.ports import EmailSender
@@ -47,6 +48,7 @@ class Container:
     token_service: JwtTokenService
     # identity
     register_user: identity.RegisterUser
+    create_user_by_admin: identity.CreateUserByAdmin
     login: identity.Login
     get_current_user: identity.GetCurrentUser
     request_password_reset: identity.RequestPasswordReset
@@ -69,6 +71,7 @@ class Container:
     # booking
     get_availability: GetAvailability
     book_class: BookClass
+    admin_book_class: AdminBookClass
     cancel_booking: CancelBooking
     join_waitlist: JoinWaitlist
     leave_waitlist: LeaveWaitlist
@@ -134,7 +137,7 @@ def build_container(
     )
 
     notifications = NotificationHandlers(
-        uow, email_sender, clock, settings.frontend_url, settings.password_reset_ttl_minutes
+        uow, email_sender, clock, settings.frontend_url, settings.password_reset_ttl_minutes, settings.invite_ttl_hours
     )
     registry.subscribe(TurnoReservado, "notifications.confirmacion", notifications.on_turno_reservado)
     registry.subscribe(TurnoCancelado, "notifications.cancelacion_y_lista_espera", notifications.on_turno_cancelado)
@@ -142,6 +145,7 @@ def build_container(
     registry.subscribe(ClasesReabiertas, "notifications.clases_reabiertas", notifications.on_clases_reabiertas)
     registry.subscribe(DiaSinClases, "notifications.dia_sin_clases", notifications.on_dia_sin_clases)
     registry.subscribe(PasswordResetRequested, "notifications.reset_password", notifications.on_password_reset_requested)
+    registry.subscribe(UserInvited, "notifications.bienvenida", notifications.on_user_invited)
     registry.subscribe(UserBlocked, "booking.cancelar_turnos_bloqueado", CancelUpcomingBookingsOfBlockedUser(uow, clock))
 
     return Container(
@@ -152,6 +156,9 @@ def build_container(
         email_sender=email_sender,
         token_service=tokens,
         register_user=identity.RegisterUser(uow, hasher, clock),
+        create_user_by_admin=identity.CreateUserByAdmin(
+            uow, hasher, secrets, clock, settings.reset_url_template, timedelta(hours=settings.invite_ttl_hours)
+        ),
         login=identity.Login(uow, hasher, tokens),
         get_current_user=identity.GetCurrentUser(uow),
         request_password_reset=identity.RequestPasswordReset(
@@ -174,6 +181,7 @@ def build_container(
         get_student_calendar=scheduling.GetStudentCalendar(uow, clock),
         get_availability=GetAvailability(uow, clock, calendar, policy),
         book_class=BookClass(uow, clock, calendar, policy),
+        admin_book_class=AdminBookClass(uow, clock, policy),
         cancel_booking=CancelBooking(uow, clock, policy),
         join_waitlist=JoinWaitlist(uow, clock, calendar, policy),
         leave_waitlist=LeaveWaitlist(uow),

@@ -4,7 +4,7 @@ from datetime import datetime
 from sqlalchemy import DateTime, Enum, ForeignKey, Index, String, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column
 
-from pilates.booking.domain.model import TurnoStatus
+from pilates.booking.domain.model import ReservadoPor, TurnoStatus
 from pilates.shared.infrastructure.db import Base
 
 
@@ -26,6 +26,10 @@ class TurnoModel(Base):
     cancel_reason: Mapped[str | None] = mapped_column(String(500))
     attendance_marked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     reminder_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    booked_by: Mapped[ReservadoPor] = mapped_column(
+        Enum(ReservadoPor, name="reservado_por", native_enum=False, create_constraint=True, values_callable=lambda x: [m.value for m in x], length=32),
+        server_default=ReservadoPor.ALUMNO.value,
+    )
 
 
 class WaitlistModel(Base):

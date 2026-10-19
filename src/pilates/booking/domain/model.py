@@ -23,6 +23,11 @@ class CanceladoPor(StrEnum):
     GIMNASIO = "gimnasio"
 
 
+class ReservadoPor(StrEnum):
+    ALUMNO = "alumno"
+    GIMNASIO = "gimnasio"
+
+
 @dataclass(frozen=True)
 class ClassSnapshot:
     """Vista de una clase desde el contexto de reservas (anti-corruption layer)."""
@@ -46,10 +51,15 @@ class Turno(AggregateRoot):
     cancel_reason: str | None = None
     attendance_marked_at: datetime | None = None
     reminder_sent_at: datetime | None = None
+    booked_by: ReservadoPor = ReservadoPor.ALUMNO
 
     @classmethod
-    def reserve(cls, *, user_id: UUID, clase_id: UUID, now: datetime) -> Turno:
-        turno = cls(id=uuid4(), user_id=user_id, clase_id=clase_id, status=TurnoStatus.CONFIRMADA, booked_at=now)
+    def reserve(
+        cls, *, user_id: UUID, clase_id: UUID, now: datetime, by: ReservadoPor = ReservadoPor.ALUMNO
+    ) -> Turno:
+        turno = cls(
+            id=uuid4(), user_id=user_id, clase_id=clase_id, status=TurnoStatus.CONFIRMADA, booked_at=now, booked_by=by
+        )
         turno.record(TurnoReservado(turno_id=turno.id, user_id=user_id, clase_id=clase_id))
         return turno
 
@@ -57,12 +67,13 @@ class Turno(AggregateRoot):
     def is_active(self) -> bool:
         return self.status is TurnoStatus.CONFIRMADA
 
-    def rebook(self, now: datetime) -> None:
+    def rebook(self, now: datetime, by: ReservadoPor = ReservadoPor.ALUMNO) -> None:
         """Reutiliza la fila (restricción única user_id+clase_id) tras una cancelación previa."""
         if self.status not in (TurnoStatus.CANCELADA, TurnoStatus.CANCELADA_POR_ADMIN):
             raise ConflictError("Ya tenés un turno en esta clase", code="already_booked")
         self.status = TurnoStatus.CONFIRMADA
         self.booked_at = now
+        self.booked_by = by
         self.cancelled_at = None
         self.cancel_reason = None
         self.reminder_sent_at = None

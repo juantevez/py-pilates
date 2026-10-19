@@ -19,3 +19,11 @@ class UserBlocked(DomainEvent):
 class PasswordResetRequested(DomainEvent):
     user_id: UUID
     reset_url: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class UserInvited(DomainEvent):
+    """Alta hecha por el gimnasio: el alumno define su contraseña desde el enlace."""
+
+    user_id: UUID
+    set_password_url: str

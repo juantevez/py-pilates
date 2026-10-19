@@ -10,6 +10,7 @@ class TurnoDTO:
     status: str
     booked_at: datetime
     cancelled_at: datetime | None
+    booked_by: str
 
 
 @dataclass(frozen=True)

@@ -4,7 +4,7 @@ from collections.abc import Callable
 from uuid import UUID
 
 from pilates.booking.application.dto import TurnoDTO
-from pilates.booking.domain.model import ClassSnapshot, Turno, WaitlistEntry
+from pilates.booking.domain.model import ClassSnapshot, ReservadoPor, Turno, WaitlistEntry
 from pilates.booking.domain.policy import BookingPolicy
 from pilates.identity.domain.events import UserBlocked
 from pilates.scheduling.domain.calendar import BookingCalendar
@@ -22,6 +22,7 @@ def to_dto(turno: Turno) -> TurnoDTO:
         status=turno.status.value,
         booked_at=turno.booked_at,
         cancelled_at=turno.cancelled_at,
+        booked_by=turno.booked_by.value,
     )
 
 
@@ -87,6 +88,42 @@ class BookClass:
 
             if entry := uow.waitlist.get(user_id, clase_id):
                 uow.waitlist.delete(entry)
+            uow.commit()
+            return to_dto(turno)
+
+
+class AdminBookClass:
+    """El gimnasio reserva en nombre de un alumno: sólo se valida el cupo de la clase."""
+
+    def __init__(self, uow: UowFactory, clock: Clock, policy: BookingPolicy) -> None:
+        self._uow, self._clock, self._policy = uow, clock, policy
+
+    def execute(self, *, admin_id: UUID, user_id: UUID, clase_id: UUID) -> TurnoDTO:
+        now = self._clock.now()
+        with self._uow() as uow:
+            # Mismo orden de bloqueos que BookClass (usuario -> clase) para no generar deadlocks.
+            user = uow.users.get(user_id, for_update=True)
+            if user is None:
+                raise NotFoundError("Usuario inexistente")
+            user.ensure_active()
+            clase = _get_class(uow, clase_id, for_update=True)
+
+            existing = uow.turnos.get_by_user_and_clase(user_id, clase_id)
+            if existing is not None and existing.is_active:
+                raise ConflictError("El alumno ya tiene un turno en esta clase", code="already_booked")
+            self._policy.ensure_admin_can_book(clase=clase, active_bookings=uow.turnos.count_active(clase_id))
+
+            if existing is not None:
+                existing.rebook(now, by=ReservadoPor.GIMNASIO)
+                uow.turnos.save(existing)
+                turno = existing
+            else:
+                turno = Turno.reserve(user_id=user_id, clase_id=clase_id, now=now, by=ReservadoPor.GIMNASIO)
+                uow.turnos.add(turno)
+
+            if entry := uow.waitlist.get(user_id, clase_id):
+                uow.waitlist.delete(entry)
+            uow.audit.record(admin_id, "booking.created_by_admin", {"turno_id": str(turno.id), "user_id": str(user_id)})
             uow.commit()
             return to_dto(turno)
 

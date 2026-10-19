@@ -56,6 +56,7 @@ class Settings(BaseSettings):
 
     frontend_url: str = "http://localhost:3000"
     password_reset_ttl_minutes: int = 60
+    invite_ttl_hours: int = 72
 
     # Admin inicial (opcional, se crea al levantar con `python -m pilates.cli create-admin`)
     admin_email: str | None = None
