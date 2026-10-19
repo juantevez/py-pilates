@@ -139,13 +139,44 @@ def test_closure_cancels_bookings_and_blocks_day(api: Api, clock: FixedClock, ou
     assert [d["es_dia_habil"] for d in cal.json()] == [True] * 5 + [False] * 2
 
 
-def test_nightly_job_skips_closed_day(api: Api, container, outbox):
+def test_nightly_job_skips_closed_day(api: Api, container, clock: FixedClock, outbox):
     admin = api.user("admin@test.com", role=Role.ADMIN)
     api.user("ana@test.com", "Ana")
     api.client.post("/admin/cierres", json={"desde": TUESDAY, "tipo": "feriado_nacional", "motivo": "Feriado"}, headers=admin)
+    # Lunes 20:00, martes cerrado: abre el miércoles y avisa las dos cosas.
+    clock.set(2026, 10, 12, 20, 0)
     result = container.generate_daily_classes.execute(notify=True)
-    assert result.estado == "cerrado" and result.fecha == date(2026, 10, 13)
-    assert any(m.to == "ana@test.com" and "Sin clases" in m.subject for m in outbox.outbox)
+    assert result.estado == "generada" and result.fecha == date(2026, 10, 14) and result.clases_creadas == 7
+    subjects = [m.subject for m in outbox.outbox if m.to == "ana@test.com"]
+    assert "Sin clases el martes 13 de octubre" in subjects
+    assert "Ya podés reservar tus turnos del miércoles 14 de octubre" in subjects
+
+    # El martes (cerrado) el job vuelve a correr: no repite los avisos.
+    outbox.outbox.clear()
+    clock.set(2026, 10, 13, 20, 0)
+    assert container.generate_daily_classes.execute(notify=True).fecha == date(2026, 10, 14)
+    assert outbox.outbox == []
+
+
+def test_closed_tomorrow_opens_next_open_day(api: Api, clock: FixedClock):
+    admin = api.user("admin@test.com", role=Role.ADMIN)
+    h = api.user("ana@test.com")
+    api.client.post("/admin/cierres", json={"desde": TUESDAY, "tipo": "feriado_nacional", "motivo": "Feriado"}, headers=admin)
+    api.client.post("/admin/clases/generar", json={"fecha": "2026-10-14"}, headers=admin)
+    wed = api.client.get("/admin/clases", params={"fecha": "2026-10-14"}, headers=admin).json()[0]["id"]
+
+    clock.set(2026, 10, 12, 19, 0)  # lunes antes de la apertura
+    days = api.client.get("/clases/disponibles", headers=h).json()
+    assert [(d["fecha"], d["estado"]) for d in days] == [
+        ("2026-10-12", "sin_clases"), (TUESDAY, "cerrado"), ("2026-10-14", "pendiente_apertura"),
+    ]
+    assert days[2]["apertura"].startswith("2026-10-12T20:00")
+    assert api.client.post("/turnos", json={"clase_id": wed}, headers=h).json()["error"] == "outside_booking_window"
+
+    clock.set(2026, 10, 12, 20, 0)  # lunes 20:00: se habilita el miércoles
+    days = api.client.get("/clases/disponibles", headers=h).json()
+    assert days[-1]["fecha"] == "2026-10-14" and days[-1]["estado"] == "abierta"
+    assert api.client.post("/turnos", json={"clase_id": wed}, headers=h).status_code == 201
 
 
 def test_nightly_job_opens_and_notifies(api: Api, container, outbox):

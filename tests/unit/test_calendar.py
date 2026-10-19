@@ -51,3 +51,17 @@ def test_grid_template_blocks():
     assert len(grid.slots) == 7
     assert [s.block for s in grid.slots].count(TimeBlock.TARDE) == 3
     assert grid.end_of(time(17)) == time(18)
+
+
+def test_closed_days_are_skipped():
+    tuesday, wednesday = date(2026, 10, 13), date(2026, 10, 14)
+    closed = {tuesday}
+    assert CAL.target_date(at(2026, 10, 12, 10), closed) == wednesday
+    assert CAL.opening_at(wednesday, at(2026, 10, 12, 10), closed) == at(2026, 10, 12, 20)
+    assert not CAL.is_bookable_date(wednesday, at(2026, 10, 12, 19, 59), closed)
+    assert CAL.is_bookable_date(wednesday, at(2026, 10, 12, 20), closed)
+    assert CAL.is_bookable_date(wednesday, at(2026, 10, 13, 9), closed)  # durante el día cerrado
+    assert CAL.bookable_dates(at(2026, 10, 12, 21), closed) == [tuesday, wednesday]
+    # Viernes cerrado: el jueves a las 20:00 se abren los del lunes.
+    assert CAL.target_date(at(2026, 10, 15, 21), {date(2026, 10, 16)}) == date(2026, 10, 19)
+    assert CAL.opening_at(date(2026, 10, 19), at(2026, 10, 15, 21), {date(2026, 10, 16)}) == at(2026, 10, 15, 20)

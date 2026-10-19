@@ -7,6 +7,7 @@ from pilates.booking.application.dto import TurnoDTO
 from pilates.booking.domain.model import ClassSnapshot, ReservadoPor, Turno, WaitlistEntry
 from pilates.booking.domain.policy import BookingPolicy
 from pilates.identity.domain.events import UserBlocked
+from pilates.scheduling.application.closures import closed_dates_from
 from pilates.scheduling.domain.calendar import BookingCalendar
 from pilates.shared.application.ports import Clock
 from pilates.shared.application.unit_of_work import UnitOfWork
@@ -73,7 +74,7 @@ class BookClass:
             self._policy.ensure_can_book(
                 now=now,
                 clase=clase,
-                within_booking_window=self._calendar.is_bookable_date(clase.fecha, now),
+                within_booking_window=self._calendar.is_bookable_date(clase.fecha, now, closed_dates_from(uow, now.date())),
                 active_bookings=uow.turnos.count_occupied(clase_id),
                 user_bookings_same_day=same_day,
             )
@@ -169,7 +170,7 @@ class JoinWaitlist:
             self._policy.ensure_can_join_waitlist(
                 now=now,
                 clase=clase,
-                within_booking_window=self._calendar.is_bookable_date(clase.fecha, now),
+                within_booking_window=self._calendar.is_bookable_date(clase.fecha, now, closed_dates_from(uow, now.date())),
                 active_bookings=uow.turnos.count_occupied(clase_id),
             )
             uow.waitlist.add(WaitlistEntry(user_id=user_id, clase_id=clase_id, created_at=now))
