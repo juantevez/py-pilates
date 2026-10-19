@@ -182,6 +182,7 @@ class SqlClassCatalog(ClassCatalog):
             id=m.id,
             fecha=m.fecha,
             starts_at=datetime.combine(m.fecha, m.start_time, tzinfo=self._tz),
+            ends_at=datetime.combine(m.fecha, m.end_time, tzinfo=self._tz),
             bloque=m.bloque.value,
             capacity=m.max_capacity,
             is_active=m.status is ClaseStatus.ACTIVA,

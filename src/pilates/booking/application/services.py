@@ -93,7 +93,7 @@ class BookClass:
 
 
 class AdminBookClass:
-    """El gimnasio reserva en nombre de un alumno: sólo se valida el cupo de la clase."""
+    """El gimnasio reserva en nombre de un alumno: sólo se valida el cupo y que la clase no haya terminado."""
 
     def __init__(self, uow: UowFactory, clock: Clock, policy: BookingPolicy) -> None:
         self._uow, self._clock, self._policy = uow, clock, policy
@@ -111,7 +111,9 @@ class AdminBookClass:
             existing = uow.turnos.get_by_user_and_clase(user_id, clase_id)
             if existing is not None and existing.is_active:
                 raise ConflictError("El alumno ya tiene un turno en esta clase", code="already_booked")
-            self._policy.ensure_admin_can_book(clase=clase, active_bookings=uow.turnos.count_active(clase_id))
+            self._policy.ensure_admin_can_book(
+                now=now, clase=clase, active_bookings=uow.turnos.count_active(clase_id)
+            )
 
             if existing is not None:
                 existing.rebook(now, by=ReservadoPor.GIMNASIO)
