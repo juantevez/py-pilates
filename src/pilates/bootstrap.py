@@ -12,6 +12,7 @@ from sqlalchemy.engine import Engine
 from pilates.booking.application.queries import GetAttendanceSheet, GetAvailability, GetMyBookings
 from pilates.booking.application.services import (
     AdminBookClass,
+    AdminCancelBooking,
     BookClass,
     CancelBooking,
     CancelUpcomingBookingsOfBlockedUser,
@@ -73,6 +74,7 @@ class Container:
     book_class: BookClass
     admin_book_class: AdminBookClass
     cancel_booking: CancelBooking
+    admin_cancel_booking: AdminCancelBooking
     join_waitlist: JoinWaitlist
     leave_waitlist: LeaveWaitlist
     my_bookings: GetMyBookings
@@ -183,6 +185,7 @@ def build_container(
         book_class=BookClass(uow, clock, calendar, policy),
         admin_book_class=AdminBookClass(uow, clock, policy),
         cancel_booking=CancelBooking(uow, clock, policy),
+        admin_cancel_booking=AdminCancelBooking(uow, clock),
         join_waitlist=JoinWaitlist(uow, clock, calendar, policy),
         leave_waitlist=LeaveWaitlist(uow),
         my_bookings=GetMyBookings(uow, clock, policy),

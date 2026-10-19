@@ -53,6 +53,7 @@ class Turno(AggregateRoot):
     attendance_marked_at: datetime | None = None
     reminder_sent_at: datetime | None = None
     booked_by: ReservadoPor = ReservadoPor.ALUMNO
+    cancelled_with_class: bool = False
 
     @classmethod
     def reserve(
@@ -77,6 +78,7 @@ class Turno(AggregateRoot):
         self.booked_by = by
         self.cancelled_at = None
         self.cancel_reason = None
+        self.cancelled_with_class = False
         self.reminder_sent_at = None
         self.record(TurnoReservado(turno_id=self.id, user_id=self.user_id, clase_id=self.clase_id))
 
@@ -92,15 +94,35 @@ class Turno(AggregateRoot):
         self._cancel(TurnoStatus.CANCELADA, now, None, CanceladoPor.ALUMNO)
 
     def cancel_by_gym(self, *, now: datetime, motivo: str) -> None:
+        """Cancelación masiva de este turno (p. ej. cuenta suspendida); no falla si ya no está activo."""
         if self.is_active:
             self._cancel(TurnoStatus.CANCELADA_POR_ADMIN, now, motivo, CanceladoPor.GIMNASIO)
 
-    def _cancel(self, status: TurnoStatus, now: datetime, motivo: str | None, por: CanceladoPor) -> None:
+    def cancel_with_class(self, *, now: datetime, motivo: str) -> None:
+        """El gimnasio canceló o cerró la clase entera: si se reactiva, se avisa a este alumno."""
+        if self.is_active:
+            self._cancel(TurnoStatus.CANCELADA_POR_ADMIN, now, motivo, CanceladoPor.GIMNASIO, con_clase=True)
+
+    def cancel_by_admin(self, *, now: datetime, class_ends_at: datetime, motivo: str | None) -> None:
+        """El gimnasio cancela este turno puntual: sin ventana de anticipación, pero no en una clase terminada."""
+        if not self.is_active:
+            raise ConflictError("El turno no está activo", code="booking_not_active")
+        if now >= class_ends_at:
+            raise BusinessRuleViolation("La clase ya terminó", code="class_finished")
+        self._cancel(TurnoStatus.CANCELADA_POR_ADMIN, now, motivo, CanceladoPor.GIMNASIO)
+
+    def _cancel(
+        self, status: TurnoStatus, now: datetime, motivo: str | None, por: CanceladoPor, *, con_clase: bool = False
+    ) -> None:
         self.status = status
         self.cancelled_at = now
         self.cancel_reason = motivo
+        self.cancelled_with_class = con_clase
         self.record(
-            TurnoCancelado(turno_id=self.id, user_id=self.user_id, clase_id=self.clase_id, por=por.value, motivo=motivo)
+            TurnoCancelado(
+                turno_id=self.id, user_id=self.user_id, clase_id=self.clase_id, por=por.value, motivo=motivo,
+                con_clase=con_clase,
+            )
         )
 
     def mark_attendance(self, *, attended: bool, now: datetime, class_date: date) -> None:

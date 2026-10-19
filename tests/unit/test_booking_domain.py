@@ -121,3 +121,27 @@ def test_admin_booking_only_checks_capacity_and_class_not_finished():
     with pytest.raises(BusinessRuleViolation) as e:
         POLICY.ensure_admin_can_book(now=datetime(2026, 10, 13, 10, 0, tzinfo=TZ), clase=clase, active_bookings=0)
     assert e.value.code == "class_finished"
+
+
+def test_admin_cancels_single_booking():
+    turno = Turno.reserve(user_id=uuid4(), clase_id=uuid4(), now=NOW)
+    ends = datetime(2026, 10, 13, 10, tzinfo=TZ)
+    with pytest.raises(BusinessRuleViolation) as e:
+        turno.cancel_by_admin(now=ends, class_ends_at=ends, motivo=None)
+    assert e.value.code == "class_finished"
+    # Sin ventana de anticipación: puede cancelar con la clase en curso.
+    turno.cancel_by_admin(now=ends - timedelta(minutes=30), class_ends_at=ends, motivo="Pidió cambio")
+    assert turno.status is TurnoStatus.CANCELADA_POR_ADMIN and not turno.cancelled_with_class
+    event = turno.pull_events()[-1]
+    assert (event.por, event.motivo, event.con_clase) == ("gimnasio", "Pidió cambio", False)
+    with pytest.raises(ConflictError) as e:
+        turno.cancel_by_admin(now=NOW, class_ends_at=ends, motivo=None)
+    assert e.value.code == "booking_not_active"
+
+
+def test_cancel_with_class_is_flagged_and_cleared_on_rebook():
+    turno = Turno.reserve(user_id=uuid4(), clase_id=uuid4(), now=NOW)
+    turno.cancel_with_class(now=NOW, motivo="Feriado")
+    assert turno.cancelled_with_class and turno.pull_events()[-1].con_clase
+    turno.rebook(NOW)
+    assert turno.is_active and not turno.cancelled_with_class
