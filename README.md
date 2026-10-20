@@ -13,7 +13,7 @@ docker compose up -d --build
 
 | Servicio | URL / rol |
 |---|---|
-| `api` | http://localhost:8000/docs (Swagger). Al arrancar corre `alembic upgrade head` y crea el admin inicial. Corre 4 procesos de uvicorn (`WEB_CONCURRENCY`) |
+| `api` | http://localhost:8000/docs (Swagger, sólo en desarrollo). Al arrancar corre `alembic upgrade head` y crea el admin inicial. Corre 4 procesos de uvicorn (`WEB_CONCURRENCY`) |
 | `worker` | Celery: procesa los eventos de dominio (envía correos y reacciona a los bloqueos de usuarios) |
 | `beat` | Celery Beat: apertura nocturna (L–V a `BOOKING_OPENING_TIME`) y recordatorios (cada 10 min) |
 | `db` | PostgreSQL 16. Puerto 5432 sólo en `127.0.0.1` (para tests y `psql` desde esta máquina) |
@@ -65,6 +65,7 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 ```
 
 - `FRONTEND_URL` y `CORS_ORIGINS` se fijan solos a `https://DOMINIO`, y el front se configura con `API_URL=https://DOMINIO/api`.
+- Swagger (`/docs`), ReDoc y `/openapi.json` quedan apagados (`API_DOCS_ENABLED=false`): describen toda la API, incluidos los endpoints de admin.
 - uvicorn confía en el `X-Forwarded-For` de Caddy (`FORWARDED_ALLOW_IPS`), así el rate limiting ve la IP real de cada cliente. Caddy descarta el que mande el cliente.
 - Los certificados viven en el volumen `caddy_data`: no borrarlo (Let's Encrypt limita cuántos se pueden volver a pedir por semana).
 - Mailpit no envía correos reales: en producción hay que configurar un SMTP (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_USE_TLS`).

@@ -111,7 +111,7 @@ En producción, `docker-compose.prod.yml` suma dos servicios y deja sólo los pu
 | `caddy` | `caddy:2.8-alpine` | `deploy/Caddyfile`. HTTPS con Let's Encrypt para `DOMAIN`, HTTP → HTTPS, HSTS. `/api/*` → `api:8000` (sin el prefijo), el resto → `web:80`. Certificados en el volumen `caddy_data` |
 | `web` | `pilates-ui:latest` | El front, construido desde `FRONT_DIR` con `API_URL=https://DOMAIN/api` |
 
-Además quita el puerto 8000 de `api`, fija `FRONTEND_URL` y `CORS_ORIGINS` a `https://DOMAIN` en `api`, `worker` y `beat`, y define `FORWARDED_ALLOW_IPS=*` para que uvicorn tome la IP del cliente del `X-Forwarded-For` que pone Caddy.
+Además quita el puerto 8000 de `api`, fija `FRONTEND_URL` y `CORS_ORIGINS` a `https://DOMAIN` en `api`, `worker` y `beat`, define `FORWARDED_ALLOW_IPS=*` para que uvicorn tome la IP del cliente del `X-Forwarded-For` que pone Caddy, y apaga Swagger (`API_DOCS_ENABLED=false`).
 
 - `worker` y `beat` esperan a que `api` esté *healthy* (`GET /health`), así las migraciones ya están aplicadas cuando arrancan.
 - La imagen corre con un usuario sin privilegios (`app`). El entrypoint es `docker/entrypoint.sh`.
@@ -301,7 +301,7 @@ Mecánica:
 ## 14. API HTTP
 
 - **Base:** `http://<host>:8000`.
-- **Documentación interactiva:** `/docs` (Swagger) y `/redoc`.
+- **Documentación interactiva:** `/docs` (Swagger), `/redoc` y `/openapi.json`. Se apagan con `API_DOCS_ENABLED=false`, como en producción.
 - **Autenticación:** `Authorization: Bearer <JWT>`.
 - **Formato:** cuerpos y respuestas en JSON. Las fechas van en ISO-8601 (`AAAA-MM-DD`) y las horas como `HH:MM:SS`.
 
@@ -470,6 +470,7 @@ Todas las variables se leen de `.env` o del entorno con `pydantic-settings` (`co
 | `INVITE_TTL_HOURS` | `72` | Link de bienvenida |
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` / `ADMIN_NAME` | — / — / `Administrador` | Admin inicial (`cli create-admin`) |
 | `CORS_ORIGINS` | `*` | Lista separada por comas |
+| `API_DOCS_ENABLED` | `true` | Publica `/docs`, `/redoc` y `/openapi.json`. `docker-compose.prod.yml` lo pone en `false` |
 | `RATE_LIMIT_ENABLED` | `true` | `false` para pruebas de carga (el compose lo pasa a la API) |
 | `RATE_LIMIT_STORAGE` | `redis` | `memory`: contador por proceso (tests, un solo worker) |
 | `LOGIN_ATTEMPTS_PER_IP_PER_MINUTE` | `20` | Intentos de login por IP por minuto |

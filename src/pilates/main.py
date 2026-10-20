@@ -12,7 +12,14 @@ from pilates.shared.http.errors import register_error_handlers
 def create_app(container: Container | None = None) -> FastAPI:
     """Factory de la app (uvicorn --factory pilates.main:create_app)."""
     container = container or build_container(get_settings())
-    app = FastAPI(title=container.settings.app_name, version="0.1.0")
+    docs = container.settings.api_docs_enabled
+    app = FastAPI(
+        title=container.settings.app_name,
+        version="0.1.0",
+        docs_url="/docs" if docs else None,
+        redoc_url="/redoc" if docs else None,
+        openapi_url="/openapi.json" if docs else None,
+    )
     app.state.container = container
     app.add_middleware(
         CORSMiddleware,
