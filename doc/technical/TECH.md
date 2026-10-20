@@ -207,7 +207,7 @@ sequenceDiagram
     UC->>U: uow.commit()
     U->>DB: INSERT outbox (una fila por evento × handler)
     U->>DB: COMMIT (cambios + eventos, atómico)
-    U->>OB: notify(ids) — Celery: send_task por fila; si falla, sólo se loguea
+    U->>OB: notify(ids) — Celery: send_task por fila, si falla, sólo se loguea
     UC-->>R: DTO
     R-->>C: 201 JSON
     Note over U: __exit__ hace rollback (no-op si ya hubo commit) y cierra la sesión
@@ -721,7 +721,7 @@ gantt
     section Mar 20
     Cerrado (feriado)                           :crit, c1, 2026-10-20 00:00, 24h
     section Mié 21
-    Reservable desde el Lun 20:00               :active, b1, 2026-10-19 20:00, 36h
+    Reservable desde el Lun a las 20 h          :active, b1, 2026-10-19 20:00, 36h
 ```
 
 - A las 18:40 del lunes, la pantalla muestra:
@@ -797,12 +797,12 @@ sequenceDiagram
                 W->>DB: reserva (desde_lista_espera) + borra su entrada, COMMIT
                 W-->>B: email "¡Tenés lugar! Te reservamos la clase…"
             else llegó a su límite
-                Note over W: sigue anotado; se prueba con el siguiente
+                Note over W: sigue anotado, se prueba con el siguiente
             end
         end
     else última hora (ya no podría cancelarlo)
         W->>W: LugarLiberado
-        W-->>B: email "¡Se liberó un lugar!" a todos; marca notified_at
+        W-->>B: email "¡Se liberó un lugar!" a todos, marca notified_at
         Note over B: Reserva el primero que hace POST /turnos
     end
 ```
@@ -1040,7 +1040,7 @@ sequenceDiagram
         alt OK
             W->>DB: processed_at = now, COMMIT
         else falla
-            W->>DB: attempts + 1, last_error; Celery reintenta con backoff
+            W->>DB: attempts + 1, last_error, Celery reintenta con backoff
         end
     end
 ```
