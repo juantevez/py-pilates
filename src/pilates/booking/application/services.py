@@ -4,6 +4,7 @@ from collections.abc import Callable
 from uuid import UUID
 
 from pilates.booking.application.dto import TurnoDTO
+from pilates.booking.domain.events import LugarLiberado, TurnoCancelado
 from pilates.booking.domain.model import ClassSnapshot, ReservadoPor, Turno, WaitlistEntry
 from pilates.booking.domain.policy import BookingPolicy
 from pilates.identity.domain.events import UserBlocked
@@ -11,7 +12,7 @@ from pilates.scheduling.application.closures import closed_dates_from
 from pilates.scheduling.domain.calendar import BookingCalendar
 from pilates.shared.application.ports import Clock
 from pilates.shared.application.unit_of_work import UnitOfWork
-from pilates.shared.domain.errors import ConflictError, NotFoundError, PermissionDenied
+from pilates.shared.domain.errors import BusinessRuleViolation, ConflictError, NotFoundError, PermissionDenied
 
 UowFactory = Callable[[], UnitOfWork]
 
@@ -175,6 +176,77 @@ class JoinWaitlist:
             )
             uow.waitlist.add(WaitlistEntry(user_id=user_id, clase_id=clase_id, created_at=now))
             uow.commit()
+
+
+class PromoteFromWaitlist:
+    """Handler de TurnoCancelado: el lugar liberado pasa al primero de la lista de espera.
+
+    Se le reserva automáticamente (respetando sus límites diarios; si no puede, se pasa al
+    siguiente) y se le avisa: si ya no lo quiere, lo cancela como cualquier turno. A menos de
+    ``cancel_min_notice`` de la clase ya no podría cancelarlo, así que no se asigna: se emite
+    LugarLiberado y se avisa a toda la lista (reserva el primero que entra).
+    """
+
+    _SKIP = ("daily_limit_reached", "block_limit_reached")
+
+    def __init__(self, uow: UowFactory, clock: Clock, policy: BookingPolicy) -> None:
+        self._uow, self._clock, self._policy = uow, clock, policy
+
+    def __call__(self, event: TurnoCancelado) -> None:
+        now = self._clock.now()
+        with self._uow() as uow:
+            clase = uow.class_catalog.get(event.clase_id)
+            entries = uow.waitlist.list_by_clase(event.clase_id)
+            if clase is None or not entries or not clase.is_active or now >= clase.starts_at:
+                return
+            if now >= clase.starts_at - self._policy.cancel_min_notice:
+                if uow.turnos.count_occupied(clase.id) < clase.capacity:
+                    uow.add_event(LugarLiberado(clase_id=clase.id))
+                    uow.commit()
+                return
+        for entry in entries:  # orden de llegada
+            if not self._try_promote(entry.user_id, event.clase_id, now):
+                break
+
+    def _try_promote(self, user_id: UUID, clase_id: UUID, now) -> bool:
+        """Una transacción por candidato. Devuelve False cuando no tiene sentido seguir (sin lugar)."""
+        with self._uow() as uow:
+            # Mismo orden de bloqueos que BookClass (usuario -> clase).
+            user = uow.users.get(user_id, for_update=True)
+            clase = uow.class_catalog.get(clase_id, for_update=True)
+            if clase is None:
+                return False
+            occupied = uow.turnos.count_occupied(clase_id)
+            if occupied >= clase.capacity:
+                return False
+            entry = uow.waitlist.get(user_id, clase_id)
+            if entry is None or user is None or user.is_blocked:
+                return True  # se bajó de la lista o no puede reservar: siguiente
+            existing = uow.turnos.get_by_user_and_clase(user_id, clase_id)
+            if existing is not None and existing.is_active:
+                uow.waitlist.delete(entry)
+                uow.commit()
+                return True
+            same_day = [
+                _get_class(uow, t.clase_id) for t in uow.turnos.list_occupied_by_user_on_date(user_id, clase.fecha)
+            ]
+            try:
+                self._policy.ensure_can_book(
+                    now=now, clase=clase, within_booking_window=True, active_bookings=occupied,
+                    user_bookings_same_day=same_day,
+                )
+            except BusinessRuleViolation as e:
+                return e.code in self._SKIP  # límites del alumno: siguiente; clase cerrada/empezada: cortar
+            except ConflictError:
+                return False
+            if existing is not None:
+                existing.rebook(now, from_waitlist=True)
+                uow.turnos.save(existing)
+            else:
+                uow.turnos.add(Turno.reserve(user_id=user_id, clase_id=clase_id, now=now, from_waitlist=True))
+            uow.waitlist.delete(entry)
+            uow.commit()
+            return True  # por si se liberó más de un lugar
 
 
 class LeaveWaitlist:

@@ -57,19 +57,27 @@ class Turno(AggregateRoot):
 
     @classmethod
     def reserve(
-        cls, *, user_id: UUID, clase_id: UUID, now: datetime, by: ReservadoPor = ReservadoPor.ALUMNO
+        cls,
+        *,
+        user_id: UUID,
+        clase_id: UUID,
+        now: datetime,
+        by: ReservadoPor = ReservadoPor.ALUMNO,
+        from_waitlist: bool = False,
     ) -> Turno:
         turno = cls(
             id=uuid4(), user_id=user_id, clase_id=clase_id, status=TurnoStatus.CONFIRMADA, booked_at=now, booked_by=by
         )
-        turno.record(TurnoReservado(turno_id=turno.id, user_id=user_id, clase_id=clase_id))
+        turno.record(
+            TurnoReservado(turno_id=turno.id, user_id=user_id, clase_id=clase_id, desde_lista_espera=from_waitlist)
+        )
         return turno
 
     @property
     def is_active(self) -> bool:
         return self.status is TurnoStatus.CONFIRMADA
 
-    def rebook(self, now: datetime, by: ReservadoPor = ReservadoPor.ALUMNO) -> None:
+    def rebook(self, now: datetime, by: ReservadoPor = ReservadoPor.ALUMNO, *, from_waitlist: bool = False) -> None:
         """Reutiliza la fila (restricción única user_id+clase_id) tras una cancelación previa."""
         if self.status not in (TurnoStatus.CANCELADA, TurnoStatus.CANCELADA_POR_ADMIN):
             raise ConflictError("Ya tenés un turno en esta clase", code="already_booked")
@@ -80,7 +88,11 @@ class Turno(AggregateRoot):
         self.cancel_reason = None
         self.cancelled_with_class = False
         self.reminder_sent_at = None
-        self.record(TurnoReservado(turno_id=self.id, user_id=self.user_id, clase_id=self.clase_id))
+        self.record(
+            TurnoReservado(
+                turno_id=self.id, user_id=self.user_id, clase_id=self.clase_id, desde_lista_espera=from_waitlist
+            )
+        )
 
     def cancel_by_student(self, *, now: datetime, class_starts_at: datetime, min_notice: timedelta) -> None:
         if not self.is_active:

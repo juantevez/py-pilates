@@ -53,6 +53,16 @@ def turno_cancelado_gimnasio(nombre: str, fecha: date, inicio: time, motivo: str
     )
 
 
+def lugar_asignado(nombre: str, fecha: date, inicio: time) -> tuple[str, str]:
+    return (
+        f"¡Tenés lugar! Te reservamos la clase del {fecha_larga(fecha)} {hora(inicio)} hs",
+        f"Hola {nombre},\n\nSe liberó un lugar en la clase del {fecha_larga(fecha)} a las {hora(inicio)} hs y, como "
+        "estabas primero en la lista de espera, ya te lo reservamos: no tenés que hacer nada más.\n"
+        "Si no podés venir, cancelá el turno desde la app hasta 1 hora antes para que lo aproveche otro alumno."
+        + _FIRMA,
+    )
+
+
 def lugar_liberado(nombre: str, fecha: date, inicio: time, url: str) -> tuple[str, str]:
     return (
         f"¡Se liberó un lugar! {fecha_larga(fecha)} {hora(inicio)} hs",

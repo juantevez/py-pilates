@@ -57,7 +57,7 @@ def my_bookings(c: ContainerDep, user: CurrentUser):
 @router.post("/clases/{clase_id}/lista-espera", status_code=status.HTTP_201_CREATED)
 def join_waitlist(clase_id: UUID, c: ContainerDep, user: CurrentUser) -> dict:
     c.join_waitlist.execute(user_id=user.id, clase_id=clase_id)
-    return {"detail": "Te avisaremos por email si se libera un lugar."}
+    return {"detail": "Si se libera un lugar, te lo reservamos automáticamente y te avisamos por email."}
 
 
 @router.delete("/clases/{clase_id}/lista-espera", status_code=status.HTTP_204_NO_CONTENT)
