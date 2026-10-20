@@ -71,10 +71,27 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 - Mailpit no envía correos reales: en producción hay que configurar un SMTP (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_USE_TLS`).
 - Para probarlo en una máquina sin dominio: `DOMAIN=localhost` usa un certificado de una CA local de Caddy (el navegador lo marca como no confiable), y `HTTP_PORT`/`HTTPS_PORT` cambian los puertos si 80/443 están ocupados (con un puerto distinto de 443 el front no llega a la API, porque `API_URL` no lleva el puerto: sirve para probar con `curl`).
 
+### Dependencias y auditoría
+
+La imagen instala versiones exactas, verificadas por hash, desde `requirements.lock` (generado con uv a partir de `pyproject.toml` y `requirements.in`). Para actualizar las dependencias y auditarlas:
+
+```bash
+uv pip compile pyproject.toml requirements.in --generate-hashes --python-version 3.12 --universal -o requirements.lock --upgrade
+uvx pip-audit -r requirements.lock --require-hashes --disable-pip   # vulnerabilidades conocidas
+docker compose build api && .venv/bin/pytest
+```
+
+Para las imágenes (paquetes del sistema operativo), con Trivy y sin darle acceso al daemon de Docker:
+
+```bash
+docker save py-pilates:latest -o /tmp/api.tar
+docker run --rm -v /tmp/api.tar:/api.tar:ro aquasec/trivy:0.58.1 image --input /api.tar --severity HIGH,CRITICAL --ignore-unfixed
+```
+
 ### Desarrollo local y tests
 
 ```bash
-uv venv && uv pip install -e '.[dev]'
+uv venv && uv pip install -r requirements.lock && uv pip install -e '.[dev]'   # mismas versiones que la imagen
 docker compose up -d db               # los tests de integración usan la base pilates_test (se crea sola)
 .venv/bin/pytest
 ```

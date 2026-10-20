@@ -99,7 +99,7 @@ flowchart LR
 |---|---|---|---|
 | `db` | `postgres:16-alpine` | — | Volumen `pgdata`, `TZ=America/Argentina/Buenos_Aires`, puerto 5432 sólo en `127.0.0.1`. Contraseña en `POSTGRES_PASSWORD` (default `pilates`) |
 | `redis` | `redis:7-alpine` | — | Sólo broker; Celery corre **sin result backend** |
-| `mailpit` | `axllent/mailpit` | — | UI en http://localhost:8025, sólo en `127.0.0.1` (muestra los links de reset) |
+| `mailpit` | `axllent/mailpit:v1.31` | — | UI en http://localhost:8025, sólo en `127.0.0.1` (muestra los links de reset) |
 | `api` | `py-pilates:latest` | `api` | `alembic upgrade head` → `pilates.cli create-admin` → `uvicorn --factory pilates.main:create_app --proxy-headers --workers ${WEB_CONCURRENCY}` (4 por defecto en el compose) |
 | `worker` | `py-pilates:latest` | `worker` | `celery worker --concurrency=${WORKER_CONCURRENCY:-2}` |
 | `beat` | `py-pilates:latest` | `beat` | `celery beat --schedule=/tmp/celerybeat-schedule` |
@@ -108,7 +108,7 @@ En producción, `docker-compose.prod.yml` suma dos servicios y deja sólo los pu
 
 | Servicio | Imagen | Notas |
 |---|---|---|
-| `caddy` | `caddy:2.8-alpine` | `deploy/Caddyfile`. HTTPS con Let's Encrypt para `DOMAIN`, HTTP → HTTPS, HSTS. `/api/*` → `api:8000` (sin el prefijo), el resto → `web:80`. Certificados en el volumen `caddy_data` |
+| `caddy` | `caddy:2.11-alpine` | `deploy/Caddyfile`. HTTPS con Let's Encrypt para `DOMAIN`, HTTP → HTTPS, HSTS. `/api/*` → `api:8000` (sin el prefijo), el resto → `web:80`. Certificados en el volumen `caddy_data` |
 | `web` | `pilates-ui:latest` | El front, construido desde `FRONT_DIR` con `API_URL=https://DOMAIN/api` |
 
 Además quita el puerto 8000 de `api`, fija `FRONTEND_URL` y `CORS_ORIGINS` a `https://DOMAIN` en `api`, `worker` y `beat`, define `FORWARDED_ALLOW_IPS=*` para que uvicorn tome la IP del cliente del `X-Forwarded-For` que pone Caddy, y apaga Swagger (`API_DOCS_ENABLED=false`).
@@ -505,7 +505,18 @@ Todas las variables se leen de `.env` o del entorno con `pydantic-settings` (`co
 - **CORS.** Es configurable. En producción conviene listar los orígenes exactos en lugar de `*`.
 - **Secreto del JWT.** Es obligatorio: la configuración rechaza un `JWT_SECRET` vacío, de menos de 32 bytes o igual a un valor de ejemplo publicado en el repo, y los errores de configuración no muestran el valor (`hide_input_in_errors`).
 - **Puertos.** Sólo la API (8000) escucha en la red. Postgres (5432) y la UI de Mailpit (8025) están atados a `127.0.0.1`: Mailpit muestra los links de recuperación de contraseña, así que abierto a la red permitiría tomar cualquier cuenta.
-- **Contenedor.** Corre con un usuario no root.
+- **Contenedor.** Corre con un usuario no root. pip se desinstala al terminar el build: no hace falta en ejecución.
+- **Dependencias.** La imagen instala versiones exactas verificadas por hash (`requirements.lock`), así cada build es reproducible y un paquete alterado en PyPI no se instala. Auditoría (octubre 2026, `pip-audit` y Trivy):
+
+  | Imagen | Resultado |
+  |---|---|
+  | `py-pilates` (Debian 13) | Sin vulnerabilidades conocidas en las librerías ni HIGH/CRITICAL con arreglo en el sistema |
+  | `pilates-ui` (`nginx:1.30-alpine` + `apk upgrade`) | Sin HIGH/CRITICAL con arreglo |
+  | `caddy:2.11-alpine` | 4 HIGH en dependencias de Go de Caddy, ya en su última versión: esperar la próxima |
+  | `postgres:16-alpine` | Go del binario `gosu` (sólo baja privilegios al arrancar, no expone red): lo arregla la imagen oficial |
+  | `redis:7-alpine` | Parche de OpenSSL pendiente en la imagen oficial; Redis no está expuesto |
+
+  Cómo repetirla: ver la sección "Dependencias y auditoría" del README.
 - **HTTPS.** En producción Caddy termina TLS (Let's Encrypt), redirige HTTP → HTTPS y manda `Strict-Transport-Security` (ver [§2](#2-despliegue-y-componentes)). El front y la API comparten origen, así que el navegador no hace pedidos CORS.
 - **Pendientes.** Ver [§21](#21-limitaciones-conocidas-y-mejoras-posibles): rotación del secreto.
 
@@ -658,7 +669,7 @@ docker compose exec db psql -U pilates -d pilates             # consola SQL
 Desarrollo sin Docker para la API:
 
 ```bash
-uv venv && uv pip install -e '.[dev]'
+uv venv && uv pip install -r requirements.lock && uv pip install -e '.[dev]'
 EVENT_BUS=sync EMAIL_BACKEND=console uvicorn --factory pilates.main:create_app --reload
 ```
 

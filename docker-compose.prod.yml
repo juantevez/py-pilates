@@ -11,7 +11,7 @@ x-prod-env: &prod-env
 
 services:
   caddy:
-    image: caddy:2.8-alpine
+    image: caddy:2.11-alpine
     environment:
       DOMAIN: ${DOMAIN}
       ACME_EMAIL: ${ACME_EMAIL:?definir ACME_EMAIL en .env (avisos de Let's Encrypt)}
