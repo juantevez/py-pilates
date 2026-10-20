@@ -1,0 +1,55 @@
+# Producción con HTTPS: Caddy delante del front y de la API, en un único dominio.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# Requiere en .env: DOMAIN (con su DNS apuntando a este servidor), ACME_EMAIL y FRONT_DIR
+# (ruta al clon de pilates-ui). Sólo quedan expuestos los puertos 80 y 443.
+
+x-prod-env: &prod-env
+  FRONTEND_URL: https://${DOMAIN:?definir DOMAIN en .env}
+  CORS_ORIGINS: https://${DOMAIN}
+
+services:
+  caddy:
+    image: caddy:2.8-alpine
+    environment:
+      DOMAIN: ${DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL:?definir ACME_EMAIL en .env (avisos de Let's Encrypt)}
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+      - "${HTTPS_PORT:-443}:443/udp"   # HTTP/3
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data   # certificados: si se pierden, Let's Encrypt limita cuántos se pueden volver a pedir
+      - caddy_config:/config
+    depends_on:
+      - api
+      - web
+    restart: unless-stopped
+
+  web:
+    build: ${FRONT_DIR:?definir FRONT_DIR en .env (ruta a pilates-ui)}
+    image: pilates-ui:latest
+    environment:
+      API_URL: https://${DOMAIN}/api
+    restart: unless-stopped
+
+  api:
+    ports: !reset []   # sólo se llega a través de Caddy
+    environment:
+      <<: *prod-env
+      # Caddy es el único que llega a la API: se confía en su X-Forwarded-For para la IP del cliente.
+      FORWARDED_ALLOW_IPS: "*"
+
+  worker:
+    environment:
+      <<: *prod-env
+
+  beat:
+    environment:
+      <<: *prod-env
+
+volumes:
+  caddy_data:
+  caddy_config:

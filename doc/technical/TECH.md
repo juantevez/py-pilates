@@ -104,6 +104,15 @@ flowchart LR
 | `worker` | `py-pilates:latest` | `worker` | `celery worker --concurrency=${WORKER_CONCURRENCY:-2}` |
 | `beat` | `py-pilates:latest` | `beat` | `celery beat --schedule=/tmp/celerybeat-schedule` |
 
+En producción, `docker-compose.prod.yml` suma dos servicios y deja sólo los puertos 80 y 443:
+
+| Servicio | Imagen | Notas |
+|---|---|---|
+| `caddy` | `caddy:2.8-alpine` | `deploy/Caddyfile`. HTTPS con Let's Encrypt para `DOMAIN`, HTTP → HTTPS, HSTS. `/api/*` → `api:8000` (sin el prefijo), el resto → `web:80`. Certificados en el volumen `caddy_data` |
+| `web` | `pilates-ui:latest` | El front, construido desde `FRONT_DIR` con `API_URL=https://DOMAIN/api` |
+
+Además quita el puerto 8000 de `api`, fija `FRONTEND_URL` y `CORS_ORIGINS` a `https://DOMAIN` en `api`, `worker` y `beat`, y define `FORWARDED_ALLOW_IPS=*` para que uvicorn tome la IP del cliente del `X-Forwarded-For` que pone Caddy.
+
 - `worker` y `beat` esperan a que `api` esté *healthy* (`GET /health`), así las migraciones ya están aplicadas cuando arrancan.
 - La imagen corre con un usuario sin privilegios (`app`). El entrypoint es `docker/entrypoint.sh`.
 
@@ -496,7 +505,8 @@ Todas las variables se leen de `.env` o del entorno con `pydantic-settings` (`co
 - **Secreto del JWT.** Es obligatorio: la configuración rechaza un `JWT_SECRET` vacío, de menos de 32 bytes o igual a un valor de ejemplo publicado en el repo, y los errores de configuración no muestran el valor (`hide_input_in_errors`).
 - **Puertos.** Sólo la API (8000) escucha en la red. Postgres (5432) y la UI de Mailpit (8025) están atados a `127.0.0.1`: Mailpit muestra los links de recuperación de contraseña, así que abierto a la red permitiría tomar cualquier cuenta.
 - **Contenedor.** Corre con un usuario no root.
-- **Pendientes.** Ver [§21](#21-limitaciones-conocidas-y-mejoras-posibles): HTTPS y rotación del secreto.
+- **HTTPS.** En producción Caddy termina TLS (Let's Encrypt), redirige HTTP → HTTPS y manda `Strict-Transport-Security` (ver [§2](#2-despliegue-y-componentes)). El front y la API comparten origen, así que el navegador no hace pedidos CORS.
+- **Pendientes.** Ver [§21](#21-limitaciones-conocidas-y-mejoras-posibles): rotación del secreto.
 
 ### 17.1 Rate limiting
 
@@ -511,7 +521,7 @@ Ventana fija con contadores en **Redis**, compartidos entre los 4 workers de uvi
 | `POST /auth/forgot-password` | `forgot:email:<sha256(email)>` | 3 por hora | Todos los pedidos para ese email, **exista o no la cuenta**: el 429 no revela qué emails están registrados. Evita que alguien llene de mails la casilla de un alumno |
 
 - **Fail open.** Si Redis no responde, se deja pasar la request y se deja de consultar Redis durante 30 s, así sólo una request por proceso paga el timeout (0,5 s, sin reintentos). Medido con Redis caído: el login tarda lo mismo que bcrypt (~0,53 s).
-- **IP del cliente.** Es `request.client.host`. Los clientes que corren en la misma máquina que Docker llegan con la IP del bridge (ej. `172.21.0.1`) y comparten el contador; los de la red local (teléfonos) conservan la suya. Detrás de un proxy hay que configurar `--forwarded-allow-ips` para que uvicorn tome `X-Forwarded-For`.
+- **IP del cliente.** Es `request.client.host`. Los clientes que corren en la misma máquina que Docker llegan con la IP del bridge (ej. `172.21.0.1`) y comparten el contador; los de la red local (teléfonos) conservan la suya. Detrás de Caddy (producción) uvicorn toma la IP del `X-Forwarded-For` (`FORWARDED_ALLOW_IPS=*`, seguro porque la API sólo es accesible desde Caddy), y Caddy reemplaza el que mande el cliente, así que no se puede falsificar.
 - **NAT compartido.** Si muchos alumnos se registran desde el Wi-Fi del estudio salen por la misma IP pública: con más de 10 por hora conviene subir `REGISTRATIONS_PER_IP_PER_HOUR`, o que recepción los dé de alta (`POST /admin/usuarios`, sin límite).
 - **Pruebas de carga.** Locust registra y loguea 40 usuarios desde la misma IP: correr con `RATE_LIMIT_ENABLED=false docker compose up -d api`.
 
@@ -680,5 +690,5 @@ Ordenadas por impacto estimado.
 2. **Horizonte de cierres de 90 días.** `closed_dates_from` y `next_open_weekday` miran 90 días hacia adelante. Un cierre continuo más largo no se saltea del todo (caso borde).
 3. **Duplicación menor.** `scheduling.application.services.next_open_day` (consulta por día) y `calendar.next_open_weekday` (sobre un conjunto en memoria) resuelven lo mismo. Se podrían unificar.
 4. **Pool y sesiones.** Engine síncrono con pool de 5 + 10 por proceso (configurable). Con 4 workers de uvicorn y el worker de Celery el máximo teórico ronda las 90 conexiones, cerca del límite de 100 de Postgres; si se suman workers, bajar `DB_MAX_OVERFLOW` o usar PgBouncer.
-5. **Sin HTTPS ni rotación del secreto.** La API y el front se sirven por HTTP, así que en la red el token y las contraseñas viajan en claro. *Mejora:* un proxy con TLS (Caddy o nginx) delante de los dos. El `JWT_SECRET` es uno solo: rotarlo cierra todas las sesiones a la vez. *Mejora:* aceptar el anterior durante 12 h (`kid` en el header del JWT).
+5. **Sin rotación gradual del secreto.** El `JWT_SECRET` es uno solo: rotarlo cierra todas las sesiones a la vez. *Mejora:* aceptar el anterior durante 12 h (`kid` en el header del JWT).
 6. **Sin observabilidad estructurada.** Hay logs de texto, sin métricas ni tracing. Los resultados de Celery no se guardan (`backend=None`). *Mejora:* logs JSON, Flower o métricas de Celery, y un healthcheck que incluya la base y Redis.
