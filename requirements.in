@@ -1,0 +1,4 @@
+# Entrada del lockfile de la imagen. Las dependencias de la app salen de pyproject.toml;
+# pip va acá para que la imagen no quede con el pip vulnerable de python:3.12-slim.
+# Regenerar: uv pip compile pyproject.toml requirements.in --generate-hashes --python-version 3.12 --universal -o requirements.lock
+pip>=26.2
