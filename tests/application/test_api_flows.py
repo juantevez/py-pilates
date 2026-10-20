@@ -225,9 +225,12 @@ def test_attendance_and_reminders(api: Api, clock: FixedClock, container, outbox
     turno = api.client.post("/turnos", json={"clase_id": ids["08:00"]}, headers=h).json()
 
     clock.set(2026, 10, 12, 21, 30)
-    assert container.send_reminders.execute() == 1  # clase a las 08:00, faltan < 12 h
+    assert container.send_reminders.execute() == 0  # recién reservó: nada de recordatorio a la noche
+    clock.set(2026, 10, 13, 7, 0)
+    assert container.send_reminders.execute() == 1  # clase de las 08:00: se recuerda a las 07:00
     assert container.send_reminders.execute() == 0
 
+    clock.set(2026, 10, 12, 21, 30)
     early = api.client.post(f"/admin/turnos/{turno['id']}/asistencia", json={"asistio": True}, headers=admin)
     assert early.json()["error"] == "class_not_started"
     clock.set(2026, 10, 13, 8, 5)

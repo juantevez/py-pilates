@@ -28,7 +28,12 @@ from pilates.identity.application import services as identity
 from pilates.identity.domain.events import PasswordResetRequested, UserBlocked, UserInvited
 from pilates.notifications.adapters.email import ConsoleEmailSender, SmtpEmailSender
 from pilates.notifications.application.events import CorreoSolicitado
-from pilates.notifications.application.handlers import DeliverEmail, NotificationHandlers, SendClassReminders
+from pilates.notifications.application.handlers import (
+    DeliverEmail,
+    NotificationHandlers,
+    ReminderSchedule,
+    SendClassReminders,
+)
 from pilates.notifications.application.ports import EmailSender
 from pilates.scheduling.application import services as scheduling
 from pilates.scheduling.domain.calendar import BookingCalendar, GridTemplate
@@ -223,5 +228,7 @@ def build_container(
         my_bookings=GetMyBookings(uow, clock, policy),
         attendance_sheet=GetAttendanceSheet(uow, clock),
         mark_attendance=MarkAttendance(uow, clock),
-        send_reminders=SendClassReminders(uow, clock, settings.reminder_hours_before),
+        send_reminders=SendClassReminders(
+            uow, clock, ReminderSchedule(timedelta(hours=settings.reminder_hours_before), settings.reminder_earliest_time)
+        ),
     )
