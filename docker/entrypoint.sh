@@ -5,7 +5,7 @@ case "$1" in
   api)
     alembic upgrade head
     python -m pilates.cli create-admin
-    exec uvicorn --factory pilates.main:create_app --host 0.0.0.0 --port 8000 --proxy-headers
+    exec uvicorn --factory pilates.main:create_app --host 0.0.0.0 --port 8000 --proxy-headers --workers "${WEB_CONCURRENCY:-1}"
     ;;
   worker)
     exec celery -A pilates.worker.celery_app:celery_app worker --loglevel="${LOG_LEVEL:-INFO}" --concurrency="${WORKER_CONCURRENCY:-2}"

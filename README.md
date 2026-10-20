@@ -11,7 +11,7 @@ docker compose up -d --build
 
 | Servicio | URL / rol |
 |---|---|
-| `api` | http://localhost:8000/docs (Swagger). Al arrancar corre `alembic upgrade head` y crea el admin inicial |
+| `api` | http://localhost:8000/docs (Swagger). Al arrancar corre `alembic upgrade head` y crea el admin inicial. Corre 4 procesos de uvicorn (`WEB_CONCURRENCY`) |
 | `worker` | Celery: procesa los eventos de dominio (envía correos y reacciona a los bloqueos de usuarios) |
 | `beat` | Celery Beat: apertura nocturna (L–V a `BOOKING_OPENING_TIME`) y recordatorios (cada 10 min) |
 | `db` | PostgreSQL 16 |

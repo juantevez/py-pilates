@@ -44,6 +44,8 @@ services:
   api:
     <<: *app
     command: ["api"]
+    environment:
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-4}   # procesos de uvicorn (uno por núcleo)
     ports:
       - "8000:8000"
     healthcheck:

@@ -21,6 +21,10 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+psycopg://pilates:pilates@localhost:5432/pilates"
     redis_url: str = "redis://localhost:6379/0"
+    # Pool por proceso: con WEB_CONCURRENCY workers de uvicorn se abren hasta
+    # workers × (pool_size + max_overflow) conexiones (Postgres admite 100 por defecto).
+    db_pool_size: int = 5
+    db_max_overflow: int = 10
 
     jwt_secret: str = "change-me"
     jwt_algorithm: str = "HS256"

@@ -98,7 +98,7 @@ flowchart LR
 | `db` | `postgres:16-alpine` | — | Volumen `pgdata`, `TZ=America/Argentina/Buenos_Aires`, puerto 5432 expuesto |
 | `redis` | `redis:7-alpine` | — | Sólo broker; Celery corre **sin result backend** |
 | `mailpit` | `axllent/mailpit` | — | UI en http://localhost:8025 |
-| `api` | `py-pilates:latest` | `api` | `alembic upgrade head` → `pilates.cli create-admin` → `uvicorn --factory pilates.main:create_app --proxy-headers` |
+| `api` | `py-pilates:latest` | `api` | `alembic upgrade head` → `pilates.cli create-admin` → `uvicorn --factory pilates.main:create_app --proxy-headers --workers ${WEB_CONCURRENCY}` (4 por defecto en el compose) |
 | `worker` | `py-pilates:latest` | `worker` | `celery worker --concurrency=${WORKER_CONCURRENCY:-2}` |
 | `beat` | `py-pilates:latest` | `beat` | `celery beat --schedule=/tmp/celerybeat-schedule` |
 
@@ -1293,6 +1293,7 @@ Todas las variables se leen de `.env` o del entorno con `pydantic-settings` (`co
 | `ENVIRONMENT` | `dev` | `dev` / `test` / `prod` |
 | `LOG_LEVEL` | `INFO` | También lo usan worker y beat |
 | `DATABASE_URL` | `postgresql+psycopg://pilates:pilates@localhost:5432/pilates` | |
+| `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` | `5` / `10` | Pool de SQLAlchemy **por proceso**. Con 4 workers de uvicorn la API puede abrir hasta 60 conexiones; sumadas al worker de Celery tienen que entrar en `max_connections` de Postgres (100) |
 | `REDIS_URL` | `redis://localhost:6379/0` | Broker Celery |
 | `JWT_SECRET` | `change-me` | **Obligatorio cambiar** en producción |
 | `JWT_ALGORITHM` | `HS256` | |
@@ -1320,6 +1321,7 @@ Todas las variables se leen de `.env` o del entorno con `pydantic-settings` (`co
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` / `ADMIN_NAME` | — / — / `Administrador` | Admin inicial (`cli create-admin`) |
 | `CORS_ORIGINS` | `*` | Lista separada por comas |
 | `WORKER_CONCURRENCY` | `2` | Sólo entrypoint del worker |
+| `WEB_CONCURRENCY` | `4` en el compose (`1` si se corre el entrypoint sin compose) | Procesos de uvicorn de la API (ver [§19.3](#193-workers-de-uvicorn)) |
 
 ---
 
@@ -1426,8 +1428,27 @@ En la corrida 3:
 | `POST /auth/login` | ≈ 5 s | 6,8 s |
 | `POST /auth/register` | ≈ 3,7 s | 6,3 s |
 
-- **CPU.** La API llegó a ~88% de un núcleo. Postgres estuvo por debajo de 7%.
-- **Cuello de botella:** bcrypt. Login y registro son CPU-bound y comparten un único proceso Python, por el GIL. Mientras los 40 usuarios entraban, ese pico arrastró el p99 de otros endpoints a 2–4 s.
+- **CPU.** Postgres estuvo por debajo de 7%. (La cifra de CPU de la API que se reportó en esta corrida estaba mal calculada; ver la medición correcta en [§19.3](#193-workers-de-uvicorn).)
+- **Cuello de botella:** bcrypt (~0,5 s por hash en esta máquina). Es CPU-bound: con 40 registros y 40 logins en ~8 s la CPU se satura y esas requests hacen cola. Mientras tanto, el p99 de otros endpoints subió a 2–4 s.
+
+### 19.3 Workers de uvicorn
+
+Misma prueba (40 usuarios, spawn 5/s, 90 s), dos corridas por configuración, en una máquina de 4 núcleos que también corre Locust y Postgres. Mediana / p95 / p99 en ms:
+
+| Endpoint | 1 worker | 4 workers |
+|---|---|---|
+| `POST /auth/login` | 4400–4900 / 7300–7600 / 8500–8900 | 5300–5800 / 7900–8000 / 8400–8700 |
+| `POST /auth/register` | 3300–3600 / 5900–6600 / 5900–6900 | 6100–6200 / 8200–8900 / 8400–9200 |
+| `GET /clases/disponibles` | 120 / 760–880 / 3700–4700 | 70 / 320–410 / 990–1200 |
+| `GET /turnos/mios` | 50 / 410–790 / 3800–4900 | 26 / 94–240 / 390–640 |
+| `POST /turnos` | 140–230 / 750–930 / 1200–2000 | 110–120 / 510–560 / 2500–3400 |
+| Total | 110–120 / 2300–2400 / 5600–6000 | 66–67 / 960–1000 / 7100 |
+
+Sin errores en ninguna corrida. CPU máxima de la API: 309–321% con 1 worker, 284–310% con 4.
+
+- **bcrypt ya usa varios núcleos con un solo proceso.** Libera el GIL: 4 verificaciones en paralelo tardan 725 ms, contra 526 ms una sola. Con la CPU saturada, más procesos no aceleran el login; el registro incluso empeora, porque entran más hashes a la vez.
+- **El resto de la API sí mejora.** Serializar JSON y usar SQLAlchemy es Python puro, que dentro de un proceso no corre en paralelo. Con 1 worker, esas requests quedan detrás de la ráfaga de logins.
+- **Decisión:** 4 workers (uno por núcleo) y bcrypt con costo 12. El login sólo se acelera con más CPU o bajando el costo de bcrypt, que es una decisión de seguridad.
 
 ---
 
@@ -1475,10 +1496,9 @@ EVENT_BUS=sync EMAIL_BACKEND=console uvicorn --factory pilates.main:create_app -
 
 Ordenadas por impacto estimado.
 
-1. **Throughput de autenticación.** bcrypt corre en un único proceso uvicorn. *Mejoras:*
-   - `uvicorn --workers N` (o gunicorn con workers uvicorn).
-   - Ajustar el pool de SQLAlchemy a `workers × hilos`.
-   - Rate limiting en `/auth/login`, `/auth/register` y `/auth/forgot-password`.
+1. **Latencia de login y registro en ráfagas.** bcrypt (costo 12, ~0,5 s por hash) satura la CPU con muchos logins simultáneos. La API ya corre con 4 workers, pero eso sólo mejora los demás endpoints (ver [§19.3](#193-workers-de-uvicorn)). *Mejoras posibles:*
+   - Más CPU, o bajar el costo de bcrypt a 10 (~4 veces más rápido; decisión de seguridad).
+   - Rate limiting en `/auth/login`, `/auth/register` y `/auth/forgot-password`, para que no se pueda saturar la CPU a propósito.
 2. **Recordatorios y apertura nocturna.**
    - Con `REMINDER_HOURS_BEFORE=12` y apertura a las 20:00, una reserva hecha a la noche para una clase de las 08:00 ya entra en la ventana. El recordatorio llega en la siguiente pasada (≤ 10 min).
    - *Mejora:* no recordar reservas hechas hace menos de X horas, o recordar la mañana de la clase.
@@ -1486,5 +1506,5 @@ Ordenadas por impacto estimado.
 4. **JWT sin revocación ni refresh.** El logout sólo borra el token del cliente. La consulta del usuario en cada request mitiga el caso de bloqueo, a costa de una query por request.
 5. **Horizonte de cierres de 90 días.** `closed_dates_from` y `next_open_weekday` miran 90 días hacia adelante. Un cierre continuo más largo no se saltea del todo (caso borde).
 6. **Duplicación menor.** `scheduling.application.services.next_open_day` (consulta por día) y `calendar.next_open_weekday` (sobre un conjunto en memoria) resuelven lo mismo. Se podrían unificar.
-7. **Pool y sesiones.** Engine síncrono con el pool por defecto (5 + 10). Con varios workers de uvicorn hay que dimensionarlo junto con `max_connections` de Postgres.
+7. **Pool y sesiones.** Engine síncrono con pool de 5 + 10 por proceso (configurable). Con 4 workers de uvicorn y el worker de Celery el máximo teórico ronda las 90 conexiones, cerca del límite de 100 de Postgres; si se suman workers, bajar `DB_MAX_OVERFLOW` o usar PgBouncer.
 8. **Sin observabilidad estructurada.** Hay logs de texto, sin métricas ni tracing. Los resultados de Celery no se guardan (`backend=None`). *Mejora:* logs JSON, Flower o métricas de Celery, y un healthcheck que incluya la base y Redis.
