@@ -1,15 +1,16 @@
+from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from pilates.booking.adapters.orm import TurnoModel
 from pilates.booking.domain.model import TurnoStatus
-from pilates.identity.adapters.orm import PasswordResetTokenModel, UserModel
+from pilates.identity.adapters.orm import PasswordResetTokenModel, SesionModel, UserModel
 from pilates.identity.application.dto import UserSummary
 from pilates.identity.application.ports import UserQueries
-from pilates.identity.domain.model import Email, PasswordResetToken, Role, User, UserStatus
-from pilates.identity.domain.repositories import PasswordResetTokenRepository, UserRepository
+from pilates.identity.domain.model import Email, PasswordResetToken, Role, Sesion, User, UserStatus
+from pilates.identity.domain.repositories import PasswordResetTokenRepository, SesionRepository, UserRepository
 from pilates.shared.application.unit_of_work import UnitOfWork
 
 
@@ -100,6 +101,46 @@ class SqlPasswordResetTokenRepository(PasswordResetTokenRepository):
             .where(PasswordResetTokenModel.user_id == user_id, PasswordResetTokenModel.used_at.is_(None))
             .values(used_at=func.now())
         )
+
+
+def _sesion_to_model(x: Sesion) -> SesionModel:
+    return SesionModel(
+        id=x.id, user_id=x.user_id, created_at=x.created_at, expires_at=x.expires_at, revoked_at=x.revoked_at,
+        revoke_reason=x.revoke_reason,
+    )
+
+
+class SqlSesionRepository(SesionRepository):
+    def __init__(self, session: Session, uow: UnitOfWork) -> None:
+        self._s, self._uow = session, uow
+
+    def add(self, sesion: Sesion) -> None:
+        self._s.add(_sesion_to_model(sesion))
+        self._uow.track(sesion)
+
+    def save(self, sesion: Sesion) -> None:
+        self._s.merge(_sesion_to_model(sesion))
+        self._uow.track(sesion)
+
+    def get(self, sesion_id: UUID) -> Sesion | None:
+        m = self._s.get(SesionModel, sesion_id)
+        if m is None:
+            return None
+        return Sesion(
+            id=m.id, user_id=m.user_id, created_at=m.created_at, expires_at=m.expires_at, revoked_at=m.revoked_at,
+            revoke_reason=m.revoke_reason,
+        )
+
+    def revoke_all_for_user(self, user_id: UUID, now: datetime, reason: str) -> int:
+        result = self._s.execute(
+            update(SesionModel)
+            .where(SesionModel.user_id == user_id, SesionModel.revoked_at.is_(None))
+            .values(revoked_at=now, revoke_reason=reason)
+        )
+        return result.rowcount
+
+    def purge_expired(self, user_id: UUID, before: datetime) -> None:
+        self._s.execute(delete(SesionModel).where(SesionModel.user_id == user_id, SesionModel.expires_at < before))
 
 
 def _count_turnos(status: TurnoStatus):

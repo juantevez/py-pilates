@@ -76,6 +76,7 @@ class Container:
     register_user: identity.RegisterUser
     create_user_by_admin: identity.CreateUserByAdmin
     login: identity.Login
+    logout: identity.Logout
     get_current_user: identity.GetCurrentUser
     request_password_reset: identity.RequestPasswordReset
     reset_password: identity.ResetPassword
@@ -201,13 +202,14 @@ def build_container(
         create_user_by_admin=identity.CreateUserByAdmin(
             uow, hasher, secrets, clock, settings.reset_url_template, timedelta(hours=settings.invite_ttl_hours)
         ),
-        login=identity.Login(uow, hasher, tokens),
+        login=identity.Login(uow, hasher, tokens, clock),
+        logout=identity.Logout(uow, clock),
         get_current_user=identity.GetCurrentUser(uow),
         request_password_reset=identity.RequestPasswordReset(
             uow, secrets, clock, settings.reset_url_template, timedelta(minutes=settings.password_reset_ttl_minutes)
         ),
         reset_password=identity.ResetPassword(uow, secrets, hasher, clock),
-        block_user=identity.BlockUser(uow),
+        block_user=identity.BlockUser(uow, clock),
         unblock_user=identity.UnblockUser(uow),
         list_users=identity.ListUsers(uow),
         generate_daily_classes=scheduling.GenerateDailyClasses(uow, clock, grid, calendar, settings.notify_closed_day),

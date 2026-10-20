@@ -281,7 +281,7 @@ Mecánica:
 - **`deps.current_user`.**
   1. Lee el header `Authorization: Bearer`.
   2. Hace `JwtTokenService.decode`.
-  3. Llama a `GetCurrentUser`, que consulta la base **en cada request** y verifica que el usuario exista y no esté bloqueado.
+  3. Llama a `GetCurrentUser`, que consulta la base **en cada request**: verifica que la sesión del token (`sid`) exista, sea de ese usuario y no esté revocada, y que el usuario exista y no esté bloqueado.
 - **`deps.require_admin`.** Exige `role == "admin"` y, si no, responde 403.
 - Los aliases `CurrentUser` y `AdminUser` se usan como anotaciones en los endpoints.
 
@@ -311,6 +311,15 @@ classDiagram
     class Email {
         <<value object>>
         +str value
+    }
+    class Sesion {
+        +UUID id  (= sid del JWT)
+        +UUID user_id
+        +datetime created_at
+        +datetime expires_at
+        +datetime? revoked_at
+        +str? revoke_reason
+        +revoke(now, reason)
     }
     class PasswordResetToken {
         +UUID id
@@ -356,17 +365,18 @@ Reglas:
 |---|---|---|
 | `RegisterUser` | Alta pública (rol alumno; `cli create-admin` lo usa con rol admin). `email_taken` si existe | `UserRegistered` (sin handlers) |
 | `CreateUserByAdmin` | Alta por recepción: contraseña aleatoria (nadie la conoce) + token con TTL `INVITE_TTL_HOURS` (72 h) | `UserInvited` → email de bienvenida con link a `/reset-password?token=…`; audit `user.created_by_admin` |
-| `Login` | Verifica bcrypt y estado; emite JWT. Mensaje genérico para no revelar si el email existe | — |
-| `GetCurrentUser` | Usado por `deps.current_user` | — |
+| `Login` | Verifica bcrypt y estado; crea una `Sesion` (un dispositivo) y emite un JWT con su `sid`. Purga las sesiones vencidas de ese usuario. Mensaje genérico para no revelar si el email existe | — |
+| `Logout` | Revoca la sesión de este dispositivo (`revoke_reason=logout`); las de otros dispositivos siguen | — |
+| `GetCurrentUser` | Usado por `deps.current_user`: sesión válida y de ese usuario (`session_revoked`) y usuario activo | — |
 | `RequestPasswordReset` | Invalida tokens previos del usuario y crea uno nuevo (TTL `PASSWORD_RESET_TTL_MINUTES`). **Nunca** revela si el email existe; ignora bloqueados | `PasswordResetRequested` → email |
-| `ResetPassword` | Consume token (`SELECT … FOR UPDATE`), cambia hash | — |
-| `BlockUser` / `UnblockUser` | Con lock del usuario | `UserBlocked` → cancela turnos futuros; audit `user.blocked` / `user.unblocked` |
+| `ResetPassword` | Consume token (`SELECT … FOR UPDATE`), cambia hash y **revoca todas las sesiones** del usuario | — |
+| `BlockUser` / `UnblockUser` | Con lock del usuario. Bloquear revoca todas sus sesiones; desbloquear no las reabre (tiene que volver a ingresar) | `UserBlocked` → cancela turnos futuros; audit `user.blocked` / `user.unblocked` |
 | `ListUsers` | Búsqueda por nombre/email (`ILIKE`), filtro por estado, paginado (máx. 200). Incluye `asistencias`, `ausencias`, `reservas_activas` | — |
 
 ### 5.3 Adaptadores de seguridad
 
 - **`BcryptPasswordHasher`.** Usa `bcrypt.gensalt()` con el costo por defecto (12). Es la operación más cara del sistema (ver [§19.2](#192-prueba-de-carga-locust)).
-- **`JwtTokenService`.** HS256. Claims: `sub` (user id), `role`, `iat` y `exp`. Duración: `JWT_EXPIRES_MINUTES`, por defecto 720 (12 h).
+- **`JwtTokenService`.** HS256. Claims: `sub` (user id), `role`, `sid` (id de la sesión), `iat` y `exp`. Duración: `JWT_EXPIRES_MINUTES`, por defecto 720 (12 h). Un token sin `sid` (emitido antes de las sesiones revocables) se rechaza con `invalid_token`.
 - **`Sha256SecretTokenGenerator`.** `secrets.token_urlsafe(32)` y su hash SHA-256.
 
 ---
@@ -1063,6 +1073,7 @@ erDiagram
     users ||--o{ turnos : "user_id"
     users ||--o{ lista_espera : "user_id"
     users ||--o{ password_reset_tokens : "user_id (CASCADE)"
+    users ||--o{ sesiones : "user_id (CASCADE)"
     users ||--o{ admin_audit_log : "admin_id"
     users ||--o{ cierres_gimnasio : "creado_por"
     clases ||--o{ turnos : "clase_id"
@@ -1116,6 +1127,14 @@ erDiagram
         varchar motivo
         uuid creado_por FK
         timestamptz creado_en
+    }
+    sesiones {
+        uuid id PK "= sid del JWT"
+        uuid user_id FK "idx"
+        timestamptz created_at
+        timestamptz expires_at
+        timestamptz revoked_at
+        varchar revoke_reason "logout|password_reset|blocked"
     }
     password_reset_tokens {
         uuid id PK
@@ -1172,6 +1191,7 @@ erDiagram
 | `04edcad12a0b` | `20261015_04edcad12a0b_initial_schema.py` | Esquema inicial (7 tablas) |
 | `7c1e4b9a2d3f` | `20261019_7c1e4b9a2d3f_turnos_booked_by.py` | `turnos.booked_by` (`alumno` por defecto) |
 | `b5d2f8e1c4a7` | `20261019_b5d2f8e1c4a7_turnos_cancelled_with_class.py` | `turnos.cancelled_with_class`. Backfill: `true` para los `cancelada_por_admin` cuyo motivo no es "Cuenta suspendida" |
+| `a8c4e2f6b1d9` | `20261020_a8c4e2f6b1d9_sesiones.py` | Tabla `sesiones` (un registro por login) |
 | `e3a9c7d1f5b2` | `20261020_e3a9c7d1f5b2_outbox.py` | Tabla `outbox` + índice parcial `ix_outbox_pending (created_at) WHERE processed_at IS NULL` |
 
 La API ejecuta `alembic upgrade head` cada vez que arranca. Para crear una revisión nueva:
@@ -1200,6 +1220,7 @@ El nombre de archivo sigue `file_template = YYYYMMDD_<rev>_<slug>`.
 | POST | `/auth/forgot-password` | — | `{email}` | 202 siempre (mensaje genérico) · 429 |
 | POST | `/auth/reset-password` | — | `{token, new_password}` | 204 · 422 `invalid_reset_token` / `weak_password` |
 | GET | `/auth/me` | usuario | — | `UserDTO` |
+| POST | `/auth/logout` | usuario | — | 204. Revoca la sesión de este dispositivo |
 
 `UserDTO`: `{id, email, full_name, role, status, created_at, blocked_reason}`.
 
@@ -1286,7 +1307,8 @@ Formato de respuesta: `{"error": "<code>", "detail": "<mensaje para mostrar>"}`.
 | HTTP | `error` | Cuándo |
 |---|---|---|
 | 401 | `not_authenticated` | Falta el header Bearer |
-| 401 | `invalid_token` | JWT inválido o expirado |
+| 401 | `invalid_token` | JWT inválido, expirado o sin `sid` |
+| 401 | `session_revoked` | La sesión del token se cerró (logout, contraseña restablecida, cuenta bloqueada) |
 | 401 | `authentication_failed` | Credenciales inválidas / usuario inexistente |
 | 403 | `permission_denied` | No es admin / el turno no es del usuario |
 | 403 | `user_blocked` | Cuenta bloqueada |
@@ -1373,9 +1395,16 @@ Todas las variables se leen de `.env` o del entorno con `pydantic-settings` (`co
   - Son de un solo uso y vencen: 60 minutos el de reset, 72 horas el de invitación.
   - Pedir un reset nuevo invalida los anteriores.
 - **Enumeración de usuarios.** `forgot-password` responde siempre 202 con el mismo mensaje. `login` devuelve "Credenciales inválidas" tanto si el email no existe como si la contraseña es incorrecta.
-- **JWT.** No hay refresh ni revocación. Como `current_user` consulta la base en cada request, igual se aplica al instante:
-  - Un usuario bloqueado pierde el acceso aunque su token no haya vencido.
-  - Si se borra un usuario, su token deja de servir.
+- **Sesiones revocables.** Cada login crea una fila en `sesiones` y el JWT lleva su id (`sid`). `current_user` la valida en cada request (una búsqueda por clave primaria), así que la revocación se aplica al instante:
+
+  | Acción | Sesiones que se cierran |
+  |---|---|
+  | `POST /auth/logout` | Sólo la de ese dispositivo |
+  | Restablecer la contraseña | Todas las del usuario |
+  | Bloquear la cuenta | Todas las del usuario (desbloquear no las reabre) |
+  | Borrar el usuario | Todas (`ON DELETE CASCADE`) |
+
+  El vencimiento lo sigue controlando el JWT (12 h). Las sesiones vencidas hace más de un día se purgan en el siguiente login de ese usuario. No hay refresh token: al vencer, se vuelve a ingresar.
 - **Autorización.** Se resuelve en el borde HTTP (`AdminUser`). Las operaciones sobre recursos propios (cancelar un turno) también verifican la pertenencia en el caso de uso.
 - **Auditoría.** Todas las acciones administrativas que modifican datos quedan registradas con `admin_id`.
 - **CORS.** Es configurable. En producción conviene listar los orígenes exactos en lugar de `*`.
@@ -1437,7 +1466,7 @@ La regla general es que el front **no duplica reglas de negocio**: decide qué b
 
 ```bash
 docker compose up -d db          # los tests crean y usan la base pilates_test
-.venv/bin/pytest                 # 77 tests
+.venv/bin/pytest                 # 82 tests
 ```
 
 | Carpeta | Tipo | Qué cubre |
@@ -1447,6 +1476,7 @@ docker compose up -d db          # los tests crean y usan la base pilates_test
 | `tests/unit/test_reminders.py` | Unitario | Horario del recordatorio el día de la clase (nunca antes de las 07:00) y omisión si se reservó después |
 | `tests/unit/test_identity_domain.py` | Unitario | Email, bloqueo, admin no bloqueable, token de un solo uso |
 | `tests/application/test_api_flows.py` | Integración (TestClient + Postgres real) | Flujos end-to-end por HTTP: registro y login, apertura, cupo y lista de espera (asignación automática por orden, salteando a quien llegó a su límite, y aviso a todos en la última hora), límites, ventana de cancelación, cierres (incluido cerrar un día ya habilitado: aviso general y apertura del siguiente), job nocturno (incluido "mañana cerrado → abre el siguiente"), asistencia, recordatorios, bloqueo, reset, calendario, reactivación, rangos de vacaciones, alta por admin, reserva y cancelación admin, cupo con asistencia marcada |
+| `tests/application/test_sessions.py` | Integración | Logout cierra sólo ese dispositivo; restablecer la contraseña y bloquear cierran todas; desbloquear no reabre; tokens sin `sid` y `sid` de otro usuario rechazados |
 | `tests/application/test_rate_limit.py` | Integración + unitario | Límite de registro por IP, recuperación de contraseña por email (sin revelar cuentas) y por IP, bloqueo por fallos de un email (sin afectar otras cuentas), reset al loguear bien, límite por IP, vencimiento de la ventana, fail open sin Redis y sin reintentos |
 | `tests/application/test_outbox.py` | Integración | El evento sobrevive a Redis caído y el relay lo entrega; un handler fallido queda pendiente y se reintenta; el despacho es idempotente; las filas que agotaron reintentos no se reenvían; en un envío masivo o en los recordatorios, un fallo de SMTP sólo reintenta al destinatario que falló |
 | `tests/application/test_concurrency.py` | Integración con hilos | Nunca se supera el cupo (alumnos; alumnos + admin; asignación desde la lista de espera compitiendo con reservas directas) |
@@ -1560,8 +1590,7 @@ Ordenadas por impacto estimado.
 1. **Latencia de login y registro en ráfagas.** bcrypt (costo 12, ~0,5 s por hash) satura la CPU con muchos logins simultáneos. La API ya corre con 4 workers, pero eso sólo mejora los demás endpoints (ver [§19.3](#193-workers-de-uvicorn)). *Mejoras posibles:*
    - Más CPU, o bajar el costo de bcrypt a 10 (~4 veces más rápido; decisión de seguridad).
    - Login, registro y recuperación de contraseña ya tienen rate limiting (ver [§17.1](#171-rate-limiting)).
-2. **JWT sin revocación ni refresh.** El logout sólo borra el token del cliente. La consulta del usuario en cada request mitiga el caso de bloqueo, a costa de una query por request.
-3. **Horizonte de cierres de 90 días.** `closed_dates_from` y `next_open_weekday` miran 90 días hacia adelante. Un cierre continuo más largo no se saltea del todo (caso borde).
-4. **Duplicación menor.** `scheduling.application.services.next_open_day` (consulta por día) y `calendar.next_open_weekday` (sobre un conjunto en memoria) resuelven lo mismo. Se podrían unificar.
-5. **Pool y sesiones.** Engine síncrono con pool de 5 + 10 por proceso (configurable). Con 4 workers de uvicorn y el worker de Celery el máximo teórico ronda las 90 conexiones, cerca del límite de 100 de Postgres; si se suman workers, bajar `DB_MAX_OVERFLOW` o usar PgBouncer.
-6. **Sin observabilidad estructurada.** Hay logs de texto, sin métricas ni tracing. Los resultados de Celery no se guardan (`backend=None`). *Mejora:* logs JSON, Flower o métricas de Celery, y un healthcheck que incluya la base y Redis.
+2. **Horizonte de cierres de 90 días.** `closed_dates_from` y `next_open_weekday` miran 90 días hacia adelante. Un cierre continuo más largo no se saltea del todo (caso borde).
+3. **Duplicación menor.** `scheduling.application.services.next_open_day` (consulta por día) y `calendar.next_open_weekday` (sobre un conjunto en memoria) resuelven lo mismo. Se podrían unificar.
+4. **Pool y sesiones.** Engine síncrono con pool de 5 + 10 por proceso (configurable). Con 4 workers de uvicorn y el worker de Celery el máximo teórico ronda las 90 conexiones, cerca del límite de 100 de Postgres; si se suman workers, bajar `DB_MAX_OVERFLOW` o usar PgBouncer.
+5. **Sin observabilidad estructurada.** Hay logs de texto, sin métricas ni tracing. Los resultados de Celery no se guardan (`backend=None`). *Mejora:* logs JSON, Flower o métricas de Celery, y un healthcheck que incluya la base y Redis.

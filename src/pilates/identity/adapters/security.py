@@ -6,7 +6,13 @@ from uuid import UUID
 import bcrypt
 import jwt
 
-from pilates.identity.application.ports import AccessTokenClaims, PasswordHasher, SecretTokenGenerator, TokenService
+from pilates.identity.application.ports import (
+    AccessTokenClaims,
+    IssuedToken,
+    PasswordHasher,
+    SecretTokenGenerator,
+    TokenService,
+)
 from pilates.shared.domain.errors import AuthenticationError
 
 
@@ -25,15 +31,19 @@ class JwtTokenService(TokenService):
     def __init__(self, secret: str, algorithm: str, expires: timedelta) -> None:
         self._secret, self._algorithm, self._expires = secret, algorithm, expires
 
-    def issue(self, user_id: UUID, role: str) -> str:
+    def issue(self, user_id: UUID, role: str, session_id: UUID) -> IssuedToken:
         now = datetime.now(UTC)
-        payload = {"sub": str(user_id), "role": role, "iat": now, "exp": now + self._expires}
-        return jwt.encode(payload, self._secret, algorithm=self._algorithm)
+        expires_at = now + self._expires
+        payload = {"sub": str(user_id), "role": role, "sid": str(session_id), "iat": now, "exp": expires_at}
+        return IssuedToken(token=jwt.encode(payload, self._secret, algorithm=self._algorithm), expires_at=expires_at)
 
     def decode(self, token: str) -> AccessTokenClaims:
+        """Los tokens sin ``sid`` (anteriores a las sesiones revocables) se rechazan."""
         try:
             payload = jwt.decode(token, self._secret, algorithms=[self._algorithm])
-            return AccessTokenClaims(user_id=UUID(payload["sub"]), role=payload["role"])
+            return AccessTokenClaims(
+                user_id=UUID(payload["sub"]), role=payload["role"], session_id=UUID(payload["sid"])
+            )
         except (jwt.PyJWTError, KeyError, ValueError):
             raise AuthenticationError("Token inválido o expirado", code="invalid_token") from None
 

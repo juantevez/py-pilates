@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from pilates.booking.application.ports import BookingQueries, ClassCatalog
     from pilates.booking.domain.repositories import TurnoRepository, WaitlistRepository
     from pilates.identity.application.ports import UserQueries
-    from pilates.identity.domain.repositories import PasswordResetTokenRepository, UserRepository
+    from pilates.identity.domain.repositories import PasswordResetTokenRepository, SesionRepository, UserRepository
     from pilates.scheduling.application.ports import ScheduleQueries
     from pilates.scheduling.domain.repositories import CierreRepository, ClaseRepository
     from pilates.shared.application.ports import AuditLog
@@ -25,6 +25,7 @@ class UnitOfWork(ABC):
 
     users: UserRepository
     reset_tokens: PasswordResetTokenRepository
+    sesiones: SesionRepository
     user_queries: UserQueries
     clases: ClaseRepository
     cierres: CierreRepository

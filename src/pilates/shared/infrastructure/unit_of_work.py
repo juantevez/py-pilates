@@ -13,6 +13,7 @@ from pilates.booking.adapters.persistence import (
 )
 from pilates.identity.adapters.persistence import (
     SqlPasswordResetTokenRepository,
+    SqlSesionRepository,
     SqlUserQueries,
     SqlUserRepository,
 )
@@ -37,6 +38,7 @@ class SqlAlchemyUnitOfWork(UnitOfWork):
         s = self.session = self._session_factory()
         self.users = SqlUserRepository(s, self)
         self.reset_tokens = SqlPasswordResetTokenRepository(s, self)
+        self.sesiones = SqlSesionRepository(s, self)
         self.user_queries = SqlUserQueries(s)
         self.clases = SqlClaseRepository(s, self)
         self.cierres = SqlCierreRepository(s, self)
