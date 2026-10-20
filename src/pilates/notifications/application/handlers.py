@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from datetime import timedelta
+from dataclasses import dataclass
+from datetime import datetime, time, timedelta
 
 from pilates.booking.domain.events import TurnoCancelado, TurnoReservado
 from pilates.booking.domain.model import CanceladoPor
@@ -135,24 +136,43 @@ class NotificationHandlers:
             uow.commit()
 
 
+@dataclass(frozen=True)
+class ReminderSchedule:
+    """Cuándo se recuerda una clase: ``hours_before`` antes del inicio, pero nunca antes de
+    ``earliest`` de ese día (nada de mails de madrugada). Si el alumno reservó después de ese
+    momento no se recuerda: acaba de recibir la confirmación."""
+
+    hours_before: timedelta
+    earliest: time
+
+    def remind_at(self, starts_at: datetime) -> datetime:
+        return max(starts_at - self.hours_before, datetime.combine(starts_at.date(), self.earliest, starts_at.tzinfo))
+
+    def is_due(self, *, now: datetime, starts_at: datetime, booked_at: datetime) -> bool:
+        at = self.remind_at(starts_at)
+        return booked_at < at <= now < starts_at
+
+
 class SendClassReminders:
-    """Tarea periódica: recordatorio N horas antes de la clase (reduce el no-show).
+    """Tarea periódica (cada 10 min): recordatorio el día de la clase (reduce el no-show).
 
     Marca el turno y encola el correo en la misma transacción: un fallo de SMTP no hace que
     la próxima pasada reenvíe los recordatorios que ya salieron.
     """
 
-    def __init__(self, uow: UowFactory, clock: Clock, hours_before: int) -> None:
-        self._uow, self._clock = uow, clock
-        self._window = timedelta(hours=hours_before)
+    def __init__(self, uow: UowFactory, clock: Clock, schedule: ReminderSchedule) -> None:
+        self._uow, self._clock, self._schedule = uow, clock, schedule
 
     def execute(self) -> int:
         now = self._clock.now()
         sent = 0
         with self._uow() as uow:
-            for turno in uow.turnos.list_pending_reminders(now, now + self._window):
+            # Superconjunto: remind_at nunca es anterior a inicio − hours_before.
+            for turno in uow.turnos.list_pending_reminders(now, now + self._schedule.hours_before):
                 user, clase = uow.users.get(turno.user_id), uow.clases.get(turno.clase_id)
                 if user is None or clase is None:
+                    continue
+                if not self._schedule.is_due(now=now, starts_at=clase.starts_at(now.tzinfo), booked_at=turno.booked_at):
                     continue
                 queue_email(uow, str(user.email), templates.recordatorio(user.full_name, clase.fecha, clase.start_time))
                 turno.mark_reminder_sent(now)

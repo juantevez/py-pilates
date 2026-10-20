@@ -120,7 +120,7 @@ def test_reminder_smtp_failure_does_not_resend_the_others(container, clock, outb
         container.book_class.execute(user_id=user.id, clase_id=clase.id)
     fail_once_for(outbox, monkeypatch, "a@test.com")
 
-    clock.set(2026, 10, 12, 21, 30)
+    clock.set(2026, 10, 13, 7, 0)
     assert container.send_reminders.execute() == 2
     assert received(outbox, "Recordatorio") == ["b@test.com"]
     assert container.send_reminders.execute() == 0  # los dos quedaron marcados

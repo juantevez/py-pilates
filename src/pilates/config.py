@@ -47,7 +47,9 @@ class Settings(BaseSettings):
     max_bookings_per_block: int = 1
 
     # Notificaciones
-    reminder_hours_before: int = 12
+    # Recordatorio: N horas antes de la clase, nunca antes de reminder_earliest_time del día de la clase.
+    reminder_hours_before: int = 2
+    reminder_earliest_time: time = time(7, 0)
     notify_closed_day: bool = True
     event_bus: Literal["celery", "sync"] = "celery"
     email_backend: Literal["smtp", "console"] = "smtp"

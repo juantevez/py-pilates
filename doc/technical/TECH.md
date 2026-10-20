@@ -653,7 +653,20 @@ Hay dos adaptadores de `EmailSender`: `SmtpEmailSender` (timeout de 15 s, STARTT
 | `PasswordResetRequested` | `on_password_reset_requested` | el usuario | "Recuperación de contraseña" |
 | `UserInvited` | `on_user_invited` | el alumno nuevo | "Bienvenido/a al estudio de Pilates" |
 
-**`SendClassReminders`** corre como tarea periódica cada 10 minutos. Busca los turnos `confirmada` sin recordatorio, de clases activas, que empiezan dentro de `[now, now + REMINDER_HOURS_BEFORE]`. Los toma con `FOR UPDATE SKIP LOCKED`, para que dos ejecuciones simultáneas no manden duplicados. Encola el recordatorio y marca `reminder_sent_at` en la misma transacción. Si el SMTP falla, sólo se reintenta ese correo y la próxima pasada no reenvía los que ya salieron.
+**`SendClassReminders`** corre como tarea periódica cada 10 minutos y recuerda la clase **el mismo día** (`ReminderSchedule`):
+
+- **Cuándo:** `max(inicio − REMINDER_HOURS_BEFORE, REMINDER_EARLIEST_TIME del día de la clase)`, con 2 h y 07:00 por defecto. Nunca sale de madrugada.
+- **Cuándo no:** si el alumno reservó después de ese momento, porque acaba de recibir la confirmación.
+
+| Reserva | Clase | Recordatorio |
+|---|---|---|
+| Lun 20:05 | Mar 08:00 | Mar 07:00 |
+| Lun 20:05 | Mar 11:00 | Mar 09:00 |
+| Lun 20:05 | Mar 17:00 | Mar 15:00 |
+| Mar 07:30 | Mar 09:00 | No (reservó después de las 07:00) |
+| Mar 13:30 | Mar 16:00 | Mar 14:00 |
+
+Como corre cada 10 minutos, el mail puede salir hasta 10 minutos después de esa hora. Busca los turnos `confirmada` sin recordatorio, de clases activas, que empiezan dentro de `[now, now + REMINDER_HOURS_BEFORE]` (un superconjunto: el momento del recordatorio nunca es anterior a `inicio − REMINDER_HOURS_BEFORE`), y filtra con `ReminderSchedule.is_due`. Los toma con `FOR UPDATE SKIP LOCKED`, para que dos ejecuciones simultáneas no manden duplicados. Encola el recordatorio y marca `reminder_sent_at` en la misma transacción. Si el SMTP falla, sólo se reintenta ese correo y la próxima pasada no reenvía los que ya salieron.
 
 Las plantillas (`templates.py`) son texto plano en español rioplatense y escriben las fechas largas a mano, por ejemplo "miércoles 21 de octubre", sin depender del locale.
 
@@ -1310,7 +1323,8 @@ Todas las variables se leen de `.env` o del entorno con `pydantic-settings` (`co
 | `CANCEL_MIN_NOTICE_MINUTES` | `60` | |
 | `MAX_BOOKINGS_PER_DAY` | `2` | |
 | `MAX_BOOKINGS_PER_BLOCK` | `1` | |
-| `REMINDER_HOURS_BEFORE` | `12` | |
+| `REMINDER_HOURS_BEFORE` | `2` | Horas antes del inicio de la clase |
+| `REMINDER_EARLIEST_TIME` | `07:00` | El recordatorio nunca sale antes de esta hora del día de la clase |
 | `NOTIFY_CLOSED_DAY` | `true` | Emails "Sin clases el …" |
 | `EVENT_BUS` | `celery` | `sync`: handlers en proceso (sin Redis) |
 | `EMAIL_BACKEND` | `smtp` | `console`: sólo log |
@@ -1404,13 +1418,14 @@ La regla general es que el front **no duplica reglas de negocio**: decide qué b
 
 ```bash
 docker compose up -d db          # los tests crean y usan la base pilates_test
-.venv/bin/pytest                 # 68 tests
+.venv/bin/pytest                 # 74 tests
 ```
 
 | Carpeta | Tipo | Qué cubre |
 |---|---|---|
 | `tests/unit/test_calendar.py` | Unitario (dominio puro) | Días hábiles, target, ventana, mismo día, grilla, **salteo de días cerrados** |
 | `tests/unit/test_booking_domain.py` | Unitario | Política (cupo, ventana, límites), estados del turno, rebook, reglas de reactivación, reserva y cancelación admin, `cancelled_with_class` |
+| `tests/unit/test_reminders.py` | Unitario | Horario del recordatorio el día de la clase (nunca antes de las 07:00) y omisión si se reservó después |
 | `tests/unit/test_identity_domain.py` | Unitario | Email, bloqueo, admin no bloqueable, token de un solo uso |
 | `tests/application/test_api_flows.py` | Integración (TestClient + Postgres real) | Flujos end-to-end por HTTP: registro y login, apertura, cupo y lista de espera, límites, ventana de cancelación, cierres (incluido cerrar un día ya habilitado: aviso general y apertura del siguiente), job nocturno (incluido "mañana cerrado → abre el siguiente"), asistencia, recordatorios, bloqueo, reset, calendario, reactivación, rangos de vacaciones, alta por admin, reserva y cancelación admin, cupo con asistencia marcada |
 | `tests/application/test_rate_limit.py` | Integración + unitario | Límite de registro por IP, recuperación de contraseña por email (sin revelar cuentas) y por IP, bloqueo por fallos de un email (sin afectar otras cuentas), reset al loguear bien, límite por IP, vencimiento de la ventana, fail open sin Redis y sin reintentos |
@@ -1526,12 +1541,9 @@ Ordenadas por impacto estimado.
 1. **Latencia de login y registro en ráfagas.** bcrypt (costo 12, ~0,5 s por hash) satura la CPU con muchos logins simultáneos. La API ya corre con 4 workers, pero eso sólo mejora los demás endpoints (ver [§19.3](#193-workers-de-uvicorn)). *Mejoras posibles:*
    - Más CPU, o bajar el costo de bcrypt a 10 (~4 veces más rápido; decisión de seguridad).
    - Login, registro y recuperación de contraseña ya tienen rate limiting (ver [§17.1](#171-rate-limiting)).
-2. **Recordatorios y apertura nocturna.**
-   - Con `REMINDER_HOURS_BEFORE=12` y apertura a las 20:00, una reserva hecha a la noche para una clase de las 08:00 ya entra en la ventana. El recordatorio llega en la siguiente pasada (≤ 10 min).
-   - *Mejora:* no recordar reservas hechas hace menos de X horas, o recordar la mañana de la clase.
-3. **Lista de espera sin prioridad.** Se avisa a todos y gana el más rápido. Es lo que se decidió, pero no hay reserva temporal para el primero de la lista.
-4. **JWT sin revocación ni refresh.** El logout sólo borra el token del cliente. La consulta del usuario en cada request mitiga el caso de bloqueo, a costa de una query por request.
-5. **Horizonte de cierres de 90 días.** `closed_dates_from` y `next_open_weekday` miran 90 días hacia adelante. Un cierre continuo más largo no se saltea del todo (caso borde).
-6. **Duplicación menor.** `scheduling.application.services.next_open_day` (consulta por día) y `calendar.next_open_weekday` (sobre un conjunto en memoria) resuelven lo mismo. Se podrían unificar.
-7. **Pool y sesiones.** Engine síncrono con pool de 5 + 10 por proceso (configurable). Con 4 workers de uvicorn y el worker de Celery el máximo teórico ronda las 90 conexiones, cerca del límite de 100 de Postgres; si se suman workers, bajar `DB_MAX_OVERFLOW` o usar PgBouncer.
-8. **Sin observabilidad estructurada.** Hay logs de texto, sin métricas ni tracing. Los resultados de Celery no se guardan (`backend=None`). *Mejora:* logs JSON, Flower o métricas de Celery, y un healthcheck que incluya la base y Redis.
+2. **Lista de espera sin prioridad.** Se avisa a todos y gana el más rápido. Es lo que se decidió, pero no hay reserva temporal para el primero de la lista.
+3. **JWT sin revocación ni refresh.** El logout sólo borra el token del cliente. La consulta del usuario en cada request mitiga el caso de bloqueo, a costa de una query por request.
+4. **Horizonte de cierres de 90 días.** `closed_dates_from` y `next_open_weekday` miran 90 días hacia adelante. Un cierre continuo más largo no se saltea del todo (caso borde).
+5. **Duplicación menor.** `scheduling.application.services.next_open_day` (consulta por día) y `calendar.next_open_weekday` (sobre un conjunto en memoria) resuelven lo mismo. Se podrían unificar.
+6. **Pool y sesiones.** Engine síncrono con pool de 5 + 10 por proceso (configurable). Con 4 workers de uvicorn y el worker de Celery el máximo teórico ronda las 90 conexiones, cerca del límite de 100 de Postgres; si se suman workers, bajar `DB_MAX_OVERFLOW` o usar PgBouncer.
+7. **Sin observabilidad estructurada.** Hay logs de texto, sin métricas ni tracing. Los resultados de Celery no se guardan (`backend=None`). *Mejora:* logs JSON, Flower o métricas de Celery, y un healthcheck que incluya la base y Redis.

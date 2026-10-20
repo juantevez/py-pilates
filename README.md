@@ -105,7 +105,7 @@ Todas son configurables por variables de entorno (ver `.env.example`).
 | Cierres | Carga manual (día o rango). Cancela los turnos del día (`cancelada_por_admin`), avisa a los alumnos y registra auditoría |
 | Reactivar / reabrir | Una clase cancelada se puede **reactivar**. Un cierre (un día o un rango, ej. vacaciones) se **reabre** eliminándolo. Las clases vuelven a estar disponibles y se avisa por email a quienes habían perdido el turno. La reserva no se restaura automáticamente: el lugar pudo haberlo tomado otro alumno |
 | Apertura nocturna | Genera la grilla (idempotente) y avisa a todos los alumnos. Si el día está cerrado, envía el aviso "sin clases" con el próximo día hábil |
-| Recordatorio | 12 h antes de la clase |
+| Recordatorio | El día de la clase: 2 h antes del inicio, nunca antes de las 07:00 (`REMINDER_HOURS_BEFORE`, `REMINDER_EARLIEST_TIME`). No se manda si se reservó después de esa hora |
 | Reserva por recepción | El admin puede anotar a un alumno salteando ventana y límites: sólo valida el cupo y que la clase no haya terminado. También puede cancelar turnos puntuales |
 | Rate limiting | Login: 20 intentos por minuto por IP y 5 fallos por email en 15 min (bloquea sólo esa cuenta). Registro: 10 por hora por IP. Recuperación de contraseña: 5 por hora por IP y 3 por email. Responde `429` con `Retry-After`. Contadores en Redis; `RATE_LIMIT_ENABLED=false` para pruebas de carga |
 | Bloqueo de usuario | No puede loguearse ni reservar. Sus turnos futuros se cancelan y se liberan los cupos |
