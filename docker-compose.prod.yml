@@ -41,6 +41,7 @@ services:
       <<: *prod-env
       # Caddy es el único que llega a la API: se confía en su X-Forwarded-For para la IP del cliente.
       FORWARDED_ALLOW_IPS: "*"
+      API_DOCS_ENABLED: "false"   # sin /docs, /redoc ni /openapi.json en producción
 
   worker:
     environment:

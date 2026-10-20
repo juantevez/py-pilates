@@ -77,6 +77,9 @@ class Settings(BaseSettings):
     admin_name: str = "Administrador"
 
     cors_origins: str = "*"
+    # Swagger (/docs), ReDoc (/redoc) y /openapi.json. En producción se apagan (docker-compose.prod.yml):
+    # describen toda la API, incluidos los endpoints de admin.
+    api_docs_enabled: bool = True
 
     # Rate limiting de login, registro y recuperación de contraseña (contadores en Redis compartidos entre workers)
     rate_limit_enabled: bool = True
