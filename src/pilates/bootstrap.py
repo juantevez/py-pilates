@@ -27,7 +27,8 @@ from pilates.identity.adapters.security import BcryptPasswordHasher, JwtTokenSer
 from pilates.identity.application import services as identity
 from pilates.identity.domain.events import PasswordResetRequested, UserBlocked, UserInvited
 from pilates.notifications.adapters.email import ConsoleEmailSender, SmtpEmailSender
-from pilates.notifications.application.handlers import NotificationHandlers, SendClassReminders
+from pilates.notifications.application.events import CorreoSolicitado
+from pilates.notifications.application.handlers import DeliverEmail, NotificationHandlers, SendClassReminders
 from pilates.notifications.application.ports import EmailSender
 from pilates.scheduling.application import services as scheduling
 from pilates.scheduling.domain.calendar import BookingCalendar, GridTemplate
@@ -150,8 +151,9 @@ def build_container(
     )
 
     notifications = NotificationHandlers(
-        uow, email_sender, clock, settings.frontend_url, settings.password_reset_ttl_minutes, settings.invite_ttl_hours
+        uow, clock, settings.frontend_url, settings.password_reset_ttl_minutes, settings.invite_ttl_hours
     )
+    registry.subscribe(CorreoSolicitado, "notifications.enviar_correo", DeliverEmail(email_sender))
     registry.subscribe(TurnoReservado, "notifications.confirmacion", notifications.on_turno_reservado)
     registry.subscribe(TurnoCancelado, "notifications.cancelacion_y_lista_espera", notifications.on_turno_cancelado)
     registry.subscribe(TurnosHabilitados, "notifications.apertura", notifications.on_turnos_habilitados)
@@ -189,7 +191,7 @@ def build_container(
         update_clase=scheduling.UpdateClase(uow),
         cancel_clase=scheduling.CancelClase(uow, clock),
         reactivate_clase=scheduling.ReactivateClase(uow, clock),
-        create_cierres=scheduling.CreateCierres(uow, clock),
+        create_cierres=scheduling.CreateCierres(uow, clock, grid, calendar, settings.notify_closed_day),
         update_cierre=scheduling.UpdateCierre(uow),
         delete_cierre=scheduling.DeleteCierre(uow, clock, grid, calendar),
         list_cierres=scheduling.ListCierres(uow),
@@ -205,5 +207,5 @@ def build_container(
         my_bookings=GetMyBookings(uow, clock, policy),
         attendance_sheet=GetAttendanceSheet(uow, clock),
         mark_attendance=MarkAttendance(uow, clock),
-        send_reminders=SendClassReminders(uow, email_sender, clock, settings.reminder_hours_before),
+        send_reminders=SendClassReminders(uow, clock, settings.reminder_hours_before),
     )

@@ -142,7 +142,9 @@ def test_closure_cancels_bookings_and_blocks_day(api: Api, clock: FixedClock, ou
 def test_nightly_job_skips_closed_day(api: Api, container, clock: FixedClock, outbox):
     admin = api.user("admin@test.com", role=Role.ADMIN)
     api.user("ana@test.com", "Ana")
+    clock.set(2026, 10, 12, 19, 0)  # el cierre se carga antes de la apertura: el aviso lo da el job
     api.client.post("/admin/cierres", json={"desde": TUESDAY, "tipo": "feriado_nacional", "motivo": "Feriado"}, headers=admin)
+    assert outbox.outbox == []
     # Lunes 20:00, martes cerrado: abre el miércoles y avisa las dos cosas.
     clock.set(2026, 10, 12, 20, 0)
     result = container.generate_daily_classes.execute(notify=True)
@@ -177,6 +179,35 @@ def test_closed_tomorrow_opens_next_open_day(api: Api, clock: FixedClock):
     days = api.client.get("/clases/disponibles", headers=h).json()
     assert days[-1]["fecha"] == "2026-10-14" and days[-1]["estado"] == "abierta"
     assert api.client.post("/turnos", json={"clase_id": wed}, headers=h).status_code == 201
+
+
+def test_closing_an_already_open_day_notifies_everyone_and_opens_the_next(api: Api, outbox):
+    admin = api.user("admin@test.com", role=Role.ADMIN)
+    ids = open_tuesday(api, admin)  # lunes 21:00: el martes ya está habilitado
+    ana, beto = api.user("ana@test.com", "Ana"), api.user("beto@test.com", "Beto")
+    api.client.post("/turnos", json={"clase_id": ids["09:00"]}, headers=ana)
+    outbox.outbox.clear()
+
+    r = api.client.post("/admin/cierres", json={"desde": TUESDAY, "tipo": "mantenimiento", "motivo": "Corte de luz"},
+                        headers=admin)
+    assert r.status_code == 201, r.text
+
+    to = lambda who: [m.subject for m in outbox.outbox if m.to == who]  # noqa: E731
+    # Ana pierde su turno: recibe la cancelación, no además el aviso general.
+    assert "Clase cancelada: martes 13 de octubre 09:00 hs" in to("ana@test.com")
+    assert "Sin clases el martes 13 de octubre" not in to("ana@test.com")
+    # Beto no tenía turno: se entera del cierre y de que ya puede reservar el miércoles.
+    assert "Sin clases el martes 13 de octubre" in to("beto@test.com")
+    assert "Ya podés reservar tus turnos del miércoles 14 de octubre" in to("beto@test.com")
+
+    wed = day_of(api.client.get("/clases/disponibles", headers=beto).json(), "2026-10-14")
+    assert wed["estado"] == "abierta" and len(wed["clases"]) == 7
+    assert api.client.post("/turnos", json={"clase_id": wed["clases"][0]["clase_id"]}, headers=beto).status_code == 201
+
+    # Un cierre de un día que todavía no se habilitó no avisa nada ahora (lo hace el job).
+    outbox.outbox.clear()
+    api.client.post("/admin/cierres", json={"desde": "2026-10-16", "tipo": "otro"}, headers=admin)
+    assert outbox.outbox == []
 
 
 def test_nightly_job_opens_and_notifies(api: Api, container, outbox):

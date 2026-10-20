@@ -80,3 +80,50 @@ def test_rows_that_exhaust_retries_are_not_relayed(container, engine, outbox, mo
         conn.execute(text("UPDATE outbox SET attempts = 10"))
     assert container.relay_outbox.execute(now=datetime.now(UTC) + LATER) == 0
     assert len(pending(engine)) == 1
+
+
+def fail_once_for(outbox, monkeypatch, address: str) -> None:
+    send, failed = outbox.send, []
+
+    def flaky(message):
+        if message.to == address and not failed:
+            failed.append(message)
+            raise OSError("SMTP rechazó el envío")
+        send(message)
+
+    monkeypatch.setattr(outbox, "send", flaky)
+
+
+def received(outbox, prefix: str) -> list[str]:
+    return sorted(m.to for m in outbox.outbox if m.subject.startswith(prefix))
+
+
+def test_mass_email_retry_only_resends_the_failed_recipient(container, engine, outbox, monkeypatch):
+    for name in ("a", "b", "c"):
+        container.register_user.execute(email=f"{name}@test.com", full_name=name, password="secreta123", role=Role.ALUMNO)
+    fail_once_for(outbox, monkeypatch, "b@test.com")
+
+    container.generate_daily_classes.execute(notify=True)  # apertura nocturna: un correo por alumno
+    assert received(outbox, "Ya podés reservar") == ["a@test.com", "c@test.com"]
+    [row] = pending(engine)
+    assert row["handler_name"] == "notifications.enviar_correo"
+
+    assert container.relay_outbox.execute(now=datetime.now(UTC) + LATER) == 1
+    assert received(outbox, "Ya podés reservar") == ["a@test.com", "b@test.com", "c@test.com"]
+
+
+def test_reminder_smtp_failure_does_not_resend_the_others(container, clock, outbox, monkeypatch):
+    container.generate_daily_classes.execute(fecha=date(2026, 10, 13))
+    clase = container.list_classes_for_date.execute(fecha=date(2026, 10, 13))[0]
+    for name in ("a", "b"):
+        user = container.register_user.execute(email=f"{name}@test.com", full_name=name, password="secreta123", role=Role.ALUMNO)
+        container.book_class.execute(user_id=user.id, clase_id=clase.id)
+    fail_once_for(outbox, monkeypatch, "a@test.com")
+
+    clock.set(2026, 10, 12, 21, 30)
+    assert container.send_reminders.execute() == 2
+    assert received(outbox, "Recordatorio") == ["b@test.com"]
+    assert container.send_reminders.execute() == 0  # los dos quedaron marcados
+
+    container.relay_outbox.execute(now=datetime.now(UTC) + LATER)
+    assert received(outbox, "Recordatorio") == ["a@test.com", "b@test.com"]

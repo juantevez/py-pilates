@@ -204,10 +204,19 @@ class ReactivateClase:
 
 
 class CreateCierres:
-    """Carga uno o varios días de cierre (rango). Si ya había reservas, se cancelan y se avisa."""
+    """Carga uno o varios días de cierre (rango). Si ya había reservas, se cancelan y se avisa.
 
-    def __init__(self, uow: UowFactory, clock: Clock) -> None:
-        self._uow, self._clock = uow, clock
+    Si el día ya estaba habilitado para reservar (la apertura nocturna ya pasó, o es hoy), el
+    job no va a volver a anunciarlo: se avisa "sin clases" a los demás alumnos en el momento.
+    Y si al cerrarlo el siguiente día abierto ya queda habilitado (su apertura fue hoy o antes),
+    se genera su grilla y se anuncia la apertura, porque el job de esta noche no lo va a hacer.
+    """
+
+    def __init__(
+        self, uow: UowFactory, clock: Clock, grid: GridTemplate, calendar: BookingCalendar, notify_closed_day: bool
+    ) -> None:
+        self._uow, self._clock, self._grid, self._calendar = uow, clock, grid, calendar
+        self._notify_closed_day = notify_closed_day
 
     def execute(
         self, *, admin_id: UUID, desde: date, hasta: date | None, tipo: TipoCierre, motivo: str | None
@@ -230,28 +239,56 @@ class CreateCierres:
             taken = [d.isoformat() for d in dates if uow.cierres.get_by_date(d)]
             if taken:
                 raise ConflictError(f"Ya hay cierres cargados para: {', '.join(taken)}", code="closure_exists")
+            closed_before = closed_dates_from(uow, now.date())
+            already_open = [d for d in dates if self._calendar.is_bookable_date(d, now, closed_before)]
+            target_before = self._calendar.target_date(now, closed_before)
             created = []
+            affected_users: dict[date, set[UUID]] = {}
             for fecha in dates:
                 cierre = CierreGimnasio.create(fecha=fecha, tipo=tipo, motivo=motivo, creado_por=admin_id, now=now)
                 uow.cierres.add(cierre)
-                affected = self._close_classes(uow, fecha, cierre.descripcion, now)
+                affected, affected_users[fecha] = self._close_classes(uow, fecha, cierre.descripcion, now)
                 uow.audit.record(
                     admin_id,
                     "closure.created",
-                    {"fecha": fecha.isoformat(), "tipo": tipo.value, "motivo": cierre.motivo, "turnos_cancelados": affected},
+                    {
+                        "fecha": fecha.isoformat(), "tipo": tipo.value, "motivo": cierre.motivo,
+                        "turnos_cancelados": affected,
+                    },
                 )
                 created.append(cierre)
+            if self._notify_closed_day:
+                by_date = {c.fecha: c for c in created}
+                for fecha in already_open:
+                    uow.add_event(
+                        DiaSinClases(
+                            fecha=fecha,
+                            motivo=by_date[fecha].descripcion,
+                            proximo_dia_habil=next_open_day(uow, fecha),
+                            excluir_user_ids=tuple(affected_users[fecha]),
+                        )
+                    )
+            self._open_new_target(uow, now, target_before)
             uow.commit()
             return [cierre_to_dto(c) for c in created]
 
+    def _open_new_target(self, uow: UnitOfWork, now: datetime, target_before: date) -> None:
+        closed = closed_dates_from(uow, now.date())
+        target = self._calendar.target_date(now, closed)
+        if target != target_before and self._calendar.is_bookable_date(target, now, closed):
+            ensure_daily_grid(uow, self._grid, target)
+            uow.add_event(TurnosHabilitados(fecha=target))
+
     @staticmethod
-    def _close_classes(uow: UnitOfWork, fecha: date, motivo: str, now: datetime) -> int:
-        affected = 0
+    def _close_classes(uow: UnitOfWork, fecha: date, motivo: str, now: datetime) -> tuple[int, set[UUID]]:
+        """Cierra las clases del día y cancela sus turnos. Devuelve (turnos cancelados, alumnos afectados)."""
+        affected, users = 0, set()
         for clase in uow.clases.list_by_date(fecha):
             clase.close_for_closure(motivo)
             uow.clases.save(clase)
+            users.update(t.user_id for t in uow.turnos.list_active_by_clase(clase.id))
             affected += release_class_bookings(uow, clase_id=clase.id, motivo=motivo, now=now)
-        return affected
+        return affected, users
 
 
 class UpdateCierre:

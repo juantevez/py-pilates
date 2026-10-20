@@ -14,11 +14,15 @@ class TurnosHabilitados(DomainEvent):
 
 @dataclass(frozen=True, kw_only=True)
 class DiaSinClases(DomainEvent):
-    """La próxima fecha hábil está cerrada (feriado, mantenimiento, etc.)."""
+    """Una fecha hábil queda cerrada (feriado, mantenimiento, etc.): se avisa a los alumnos.
+
+    ``excluir_user_ids``: alumnos que ya reciben el aviso de cancelación de su turno ese día.
+    """
 
     fecha: date
     motivo: str
     proximo_dia_habil: date
+    excluir_user_ids: tuple[UUID, ...] = ()
 
 
 @dataclass(frozen=True, kw_only=True)
