@@ -48,6 +48,28 @@ FRONTEND_URL=http://192.168.0.2:3000
 
 Después corré `docker compose up -d` y abrí `http://192.168.0.2:3000` en el teléfono. Si el router le cambia la IP a la PC, actualizá estas dos líneas.
 
+### Producción con HTTPS
+
+`docker-compose.prod.yml` agrega **Caddy** delante del front y de la API, en un único dominio: el front en `https://DOMINIO/` y la API en `https://DOMINIO/api`. Caddy saca y renueva solo el certificado de Let's Encrypt, redirige HTTP → HTTPS y manda HSTS. Sólo quedan expuestos los puertos 80 y 443; la API (8000) deja de estar publicada.
+
+Requisitos: un dominio con su registro DNS (A/AAAA) apuntando al servidor, los puertos 80 y 443 abiertos, y el repo `pilates-ui` clonado en el mismo servidor. En `.env`:
+
+```env
+DOMAIN=reservas.tuestudio.com
+ACME_EMAIL=vos@tuestudio.com         # avisos de Let's Encrypt (vencimientos, problemas)
+FRONT_DIR=../pilates-ui              # ruta al clon de pilates-ui
+```
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+```
+
+- `FRONTEND_URL` y `CORS_ORIGINS` se fijan solos a `https://DOMINIO`, y el front se configura con `API_URL=https://DOMINIO/api`.
+- uvicorn confía en el `X-Forwarded-For` de Caddy (`FORWARDED_ALLOW_IPS`), así el rate limiting ve la IP real de cada cliente. Caddy descarta el que mande el cliente.
+- Los certificados viven en el volumen `caddy_data`: no borrarlo (Let's Encrypt limita cuántos se pueden volver a pedir por semana).
+- Mailpit no envía correos reales: en producción hay que configurar un SMTP (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_USE_TLS`).
+- Para probarlo en una máquina sin dominio: `DOMAIN=localhost` usa un certificado de una CA local de Caddy (el navegador lo marca como no confiable), y `HTTP_PORT`/`HTTPS_PORT` cambian los puertos si 80/443 están ocupados (con un puerto distinto de 443 el front no llega a la API, porque `API_URL` no lleva el puerto: sirve para probar con `curl`).
+
 ### Desarrollo local y tests
 
 ```bash
