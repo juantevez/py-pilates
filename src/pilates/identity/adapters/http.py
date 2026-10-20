@@ -1,9 +1,11 @@
+import hashlib
 from uuid import UUID
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, Query, Request, status
 from pydantic import BaseModel, EmailStr, Field
 
 from pilates.identity.application.dto import UserDTO, UserSummary
+from pilates.shared.domain.errors import AuthenticationError
 from pilates.shared.http.deps import AdminUser, ContainerDep, CurrentUser
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -45,14 +47,34 @@ class BlockRequest(BaseModel):
     motivo: str = Field(default="", max_length=500)
 
 
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "desconocida"
+
+
+def _email_key(email: str) -> str:
+    # El email no se guarda en claro en Redis.
+    return hashlib.sha256(email.strip().lower().encode()).hexdigest()[:32]
+
+
 @router.post("/register", status_code=status.HTTP_201_CREATED, response_model=UserDTO)
-def register(body: RegisterRequest, c: ContainerDep):
+def register(body: RegisterRequest, request: Request, c: ContainerDep):
+    c.rate_limiter.hit(f"register:ip:{_client_ip(request)}", c.settings.registrations_per_ip_per_hour, 3600)
     return c.register_user.execute(email=body.email, full_name=body.full_name, password=body.password)
 
 
 @router.post("/login", response_model=TokenResponse)
-def login(body: LoginRequest, c: ContainerDep):
-    result = c.login.execute(email=body.email, password=body.password)
+def login(body: LoginRequest, request: Request, c: ContainerDep):
+    """Límites: intentos por IP por minuto, y fallos por email (contra fuerza bruta a una cuenta)."""
+    s, limiter = c.settings, c.rate_limiter
+    limiter.hit(f"login:ip:{_client_ip(request)}", s.login_attempts_per_ip_per_minute, 60)
+    failures = f"login:fail:{_email_key(body.email)}"
+    limiter.check(failures, s.login_failures_per_email)
+    try:
+        result = c.login.execute(email=body.email, password=body.password)
+    except AuthenticationError:
+        limiter.record(failures, s.login_failure_window_minutes * 60)
+        raise
+    limiter.reset(failures)
     return TokenResponse(access_token=result.access_token, user=result.user)
 
 

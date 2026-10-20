@@ -107,6 +107,7 @@ Todas son configurables por variables de entorno (ver `.env.example`).
 | Apertura nocturna | Genera la grilla (idempotente) y avisa a todos los alumnos. Si el día está cerrado, envía el aviso "sin clases" con el próximo día hábil |
 | Recordatorio | 12 h antes de la clase |
 | Reserva por recepción | El admin puede anotar a un alumno salteando ventana y límites: sólo valida el cupo y que la clase no haya terminado. También puede cancelar turnos puntuales |
+| Rate limiting | Login: 20 intentos por minuto por IP y 5 fallos por email en 15 min (bloquea sólo esa cuenta). Registro: 10 por hora por IP. Responde `429` con `Retry-After`. Contadores en Redis; `RATE_LIMIT_ENABLED=false` para pruebas de carga |
 | Bloqueo de usuario | No puede loguearse ni reservar. Sus turnos futuros se cancelan y se liberan los cupos |
 | Asistencia | El admin marca `asistio` / `no_asistio` desde el día de la clase. Las estadísticas aparecen en el listado de usuarios |
 

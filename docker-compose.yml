@@ -46,6 +46,7 @@ services:
     command: ["api"]
     environment:
       WEB_CONCURRENCY: ${WEB_CONCURRENCY:-4}   # procesos de uvicorn (uno por núcleo)
+      RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}   # false para pruebas de carga
     ports:
       - "8000:8000"
     healthcheck:
