@@ -2,8 +2,10 @@
 
 Uso:
     pip install locust
+    RATE_LIMIT_ENABLED=false docker compose up -d api   # todos los usuarios salen de la misma IP
     locust -f tests/load/locustfile.py --host http://localhost:8000 \
         --users 40 --spawn-rate 5 --run-time 3m --headless
+    docker compose up -d api                            # volver a activar el rate limiting
 """
 
 import itertools

@@ -69,6 +69,14 @@ class Settings(BaseSettings):
 
     cors_origins: str = "*"
 
+    # Rate limiting de login y registro (contadores compartidos en Redis entre workers)
+    rate_limit_enabled: bool = True
+    rate_limit_storage: Literal["redis", "memory"] = "redis"
+    login_attempts_per_ip_per_minute: int = 20
+    login_failures_per_email: int = 5
+    login_failure_window_minutes: int = 15
+    registrations_per_ip_per_hour: int = 10
+
     @field_validator("morning_slots", "afternoon_slots")
     @classmethod
     def _validate_slots(cls, v: str) -> str:

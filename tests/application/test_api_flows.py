@@ -302,7 +302,7 @@ def test_same_day_booking_can_be_disabled(engine, clock, outbox):
     from pilates.shared.domain.errors import BusinessRuleViolation
     from tests.conftest import TEST_DB_URL
 
-    settings = Settings(database_url=TEST_DB_URL, event_bus="sync", email_backend="console", jwt_secret="x" * 32,
+    settings = Settings(database_url=TEST_DB_URL, event_bus="sync", email_backend="console", jwt_secret="x" * 32, rate_limit_storage="memory",
                         allow_same_day_booking=False, _env_file=None)
     c = build_container(settings, engine=engine, clock=clock, email_sender=outbox)
     c.generate_daily_classes.execute(fecha=date(2026, 10, 13))

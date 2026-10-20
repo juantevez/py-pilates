@@ -37,6 +37,12 @@ from pilates.shared.application.ports import Clock
 from pilates.shared.infrastructure.clock import SystemClock
 from pilates.shared.infrastructure.db import make_engine, make_session_factory
 from pilates.shared.infrastructure.event_bus import EventRegistry
+from pilates.shared.infrastructure.rate_limit import (
+    InMemoryRateLimiter,
+    NoopRateLimiter,
+    RateLimiter,
+    RedisRateLimiter,
+)
 from pilates.shared.infrastructure.outbox import (
     CeleryOutboxNotifier,
     Outbox,
@@ -59,6 +65,7 @@ class Container:
     relay_outbox: OutboxRelay
     email_sender: EmailSender
     token_service: JwtTokenService
+    rate_limiter: RateLimiter
     # identity
     register_user: identity.RegisterUser
     create_user_by_admin: identity.CreateUserByAdmin
@@ -103,6 +110,14 @@ def _email_sender(settings: Settings) -> EmailSender:
         host=settings.smtp_host, port=settings.smtp_port, sender=settings.email_from,
         username=settings.smtp_user, password=settings.smtp_password, use_tls=settings.smtp_use_tls,
     )
+
+
+def _rate_limiter(settings: Settings) -> RateLimiter:
+    if not settings.rate_limit_enabled:
+        return NoopRateLimiter()
+    if settings.rate_limit_storage == "memory":
+        return InMemoryRateLimiter()
+    return RedisRateLimiter.from_url(settings.redis_url)
 
 
 def _outbox_notifier(settings: Settings, dispatcher: OutboxDispatcher) -> OutboxNotifier:
@@ -173,6 +188,7 @@ def build_container(
         relay_outbox=OutboxRelay(session_factory, outbox),
         email_sender=email_sender,
         token_service=tokens,
+        rate_limiter=_rate_limiter(settings),
         register_user=identity.RegisterUser(uow, hasher, clock),
         create_user_by_admin=identity.CreateUserByAdmin(
             uow, hasher, secrets, clock, settings.reset_url_template, timedelta(hours=settings.invite_ttl_hours)

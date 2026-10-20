@@ -1163,8 +1163,8 @@ El nombre de archivo sigue `file_template = YYYYMMDD_<rev>_<slug>`.
 
 | Método | Ruta | Auth | Body | Respuesta |
 |---|---|---|---|---|
-| POST | `/auth/register` | — | `{email, full_name, password(8–128)}` | 201 `UserDTO` · 409 `email_taken` · 422 |
-| POST | `/auth/login` | — | `{email, password}` | 200 `{access_token, token_type, user}` · 401 · 403 `user_blocked` |
+| POST | `/auth/register` | — | `{email, full_name, password(8–128)}` | 201 `UserDTO` · 409 `email_taken` · 422 · 429 |
+| POST | `/auth/login` | — | `{email, password}` | 200 `{access_token, token_type, user}` · 401 · 403 `user_blocked` · 429 |
 | POST | `/auth/forgot-password` | — | `{email}` | 202 siempre (mensaje genérico) |
 | POST | `/auth/reset-password` | — | `{token, new_password}` | 204 · 422 `invalid_reset_token` / `weak_password` |
 | GET | `/auth/me` | usuario | — | `UserDTO` |
@@ -1281,6 +1281,7 @@ Formato de respuesta: `{"error": "<code>", "detail": "<mensaje para mostrar>"}`.
 | 422 | `not_a_weekday` / `date_in_past` / `invalid_range` | Fechas inválidas |
 | 422 | `cannot_block_admin` | Bloquear a un admin |
 | 422 | `invalid_email` / `invalid_name` / `weak_password` / `invalid_reset_token` | Identidad |
+| 429 | `too_many_requests` | Rate limiting de login o registro. Header `Retry-After` en segundos; `detail` dice cuánto esperar (ver [§17.1](#171-rate-limiting)) |
 
 ---
 
@@ -1320,6 +1321,11 @@ Todas las variables se leen de `.env` o del entorno con `pydantic-settings` (`co
 | `INVITE_TTL_HOURS` | `72` | Link de bienvenida |
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` / `ADMIN_NAME` | — / — / `Administrador` | Admin inicial (`cli create-admin`) |
 | `CORS_ORIGINS` | `*` | Lista separada por comas |
+| `RATE_LIMIT_ENABLED` | `true` | `false` para pruebas de carga (el compose lo pasa a la API) |
+| `RATE_LIMIT_STORAGE` | `redis` | `memory`: contador por proceso (tests, un solo worker) |
+| `LOGIN_ATTEMPTS_PER_IP_PER_MINUTE` | `20` | Intentos de login por IP por minuto |
+| `LOGIN_FAILURES_PER_EMAIL` / `LOGIN_FAILURE_WINDOW_MINUTES` | `5` / `15` | Logins fallidos por email antes de bloquear esa cuenta durante la ventana |
+| `REGISTRATIONS_PER_IP_PER_HOUR` | `10` | Registros públicos por IP por hora |
 | `WORKER_CONCURRENCY` | `2` | Sólo entrypoint del worker |
 | `WEB_CONCURRENCY` | `4` en el compose (`1` si se corre el entrypoint sin compose) | Procesos de uvicorn de la API (ver [§19.3](#193-workers-de-uvicorn)) |
 
@@ -1340,7 +1346,22 @@ Todas las variables se leen de `.env` o del entorno con `pydantic-settings` (`co
 - **Auditoría.** Todas las acciones administrativas que modifican datos quedan registradas con `admin_id`.
 - **CORS.** Es configurable. En producción conviene listar los orígenes exactos en lugar de `*`.
 - **Contenedor.** Corre con un usuario no root.
-- **Pendientes.** Ver [§21](#21-limitaciones-conocidas-y-mejoras-posibles): rate limiting, HTTPS y rotación del secreto.
+- **Pendientes.** Ver [§21](#21-limitaciones-conocidas-y-mejoras-posibles): HTTPS y rotación del secreto.
+
+### 17.1 Rate limiting
+
+Ventana fija con contadores en **Redis**, compartidos entre los 4 workers de uvicorn (`shared/infrastructure/rate_limit.py`). Al pasarse del límite la API responde `429 too_many_requests` con `Retry-After`.
+
+| Endpoint | Clave | Límite por defecto | Qué cuenta |
+|---|---|---|---|
+| `POST /auth/login` | `login:ip:<ip>` | 20 por minuto | Todos los intentos |
+| `POST /auth/login` | `login:fail:<sha256(email)>` | 5 en 15 minutos | Sólo los fallidos (401). Un login correcto lo resetea. Al llegar al límite, esa cuenta queda bloqueada aunque la contraseña sea correcta, y las demás cuentas siguen funcionando |
+| `POST /auth/register` | `register:ip:<ip>` | 10 por hora | Todos los intentos |
+
+- **Fail open.** Si Redis no responde, se deja pasar la request y se deja de consultar Redis durante 30 s, así sólo una request por proceso paga el timeout (0,5 s, sin reintentos). Medido con Redis caído: el login tarda lo mismo que bcrypt (~0,53 s).
+- **IP del cliente.** Es `request.client.host`. Los clientes que corren en la misma máquina que Docker llegan con la IP del bridge (ej. `172.21.0.1`) y comparten el contador; los de la red local (teléfonos) conservan la suya. Detrás de un proxy hay que configurar `--forwarded-allow-ips` para que uvicorn tome `X-Forwarded-For`.
+- **NAT compartido.** Si muchos alumnos se registran desde el Wi-Fi del estudio salen por la misma IP pública: con más de 10 por hora conviene subir `REGISTRATIONS_PER_IP_PER_HOUR`, o que recepción los dé de alta (`POST /admin/usuarios`, sin límite).
+- **Pruebas de carga.** Locust registra y loguea 40 usuarios desde la misma IP: correr con `RATE_LIMIT_ENABLED=false docker compose up -d api`.
 
 ---
 
@@ -1380,7 +1401,7 @@ La regla general es que el front **no duplica reglas de negocio**: decide qué b
 
 ```bash
 docker compose up -d db          # los tests crean y usan la base pilates_test
-.venv/bin/pytest                 # 59 tests
+.venv/bin/pytest                 # 66 tests
 ```
 
 | Carpeta | Tipo | Qué cubre |
@@ -1389,6 +1410,7 @@ docker compose up -d db          # los tests crean y usan la base pilates_test
 | `tests/unit/test_booking_domain.py` | Unitario | Política (cupo, ventana, límites), estados del turno, rebook, reglas de reactivación, reserva y cancelación admin, `cancelled_with_class` |
 | `tests/unit/test_identity_domain.py` | Unitario | Email, bloqueo, admin no bloqueable, token de un solo uso |
 | `tests/application/test_api_flows.py` | Integración (TestClient + Postgres real) | Flujos end-to-end por HTTP: registro y login, apertura, cupo y lista de espera, límites, ventana de cancelación, cierres (incluido cerrar un día ya habilitado: aviso general y apertura del siguiente), job nocturno (incluido "mañana cerrado → abre el siguiente"), asistencia, recordatorios, bloqueo, reset, calendario, reactivación, rangos de vacaciones, alta por admin, reserva y cancelación admin, cupo con asistencia marcada |
+| `tests/application/test_rate_limit.py` | Integración + unitario | Límite de registro por IP, bloqueo por fallos de un email (sin afectar otras cuentas), reset al loguear bien, límite por IP, vencimiento de la ventana, fail open sin Redis y sin reintentos |
 | `tests/application/test_outbox.py` | Integración | El evento sobrevive a Redis caído y el relay lo entrega; un handler fallido queda pendiente y se reintenta; el despacho es idempotente; las filas que agotaron reintentos no se reenvían; en un envío masivo o en los recordatorios, un fallo de SMTP sólo reintenta al destinatario que falló |
 | `tests/application/test_concurrency.py` | Integración con hilos | Nunca se supera el cupo (alumnos, y alumnos + admin) |
 
@@ -1407,8 +1429,10 @@ En `conftest.py`:
 - Los rechazos de negocio (4xx) cuentan como éxito; sólo los 5xx cuentan como fallo.
 
 ```bash
+RATE_LIMIT_ENABLED=false docker compose up -d api      # si no, el rate limiting corta los registros
 locust -f tests/load/locustfile.py --host http://localhost:8000 \
     --users 40 --spawn-rate 5 --run-time 3m --headless --only-summary
+docker compose up -d api                                # volver a activarlo
 ```
 
 Resultados en el entorno de desarrollo (una PC, un solo proceso uvicorn), 19/10/2026, 40 usuarios durante 3 minutos:
@@ -1498,7 +1522,7 @@ Ordenadas por impacto estimado.
 
 1. **Latencia de login y registro en ráfagas.** bcrypt (costo 12, ~0,5 s por hash) satura la CPU con muchos logins simultáneos. La API ya corre con 4 workers, pero eso sólo mejora los demás endpoints (ver [§19.3](#193-workers-de-uvicorn)). *Mejoras posibles:*
    - Más CPU, o bajar el costo de bcrypt a 10 (~4 veces más rápido; decisión de seguridad).
-   - Rate limiting en `/auth/login`, `/auth/register` y `/auth/forgot-password`, para que no se pueda saturar la CPU a propósito.
+   - Login y registro ya tienen rate limiting (ver [§17.1](#171-rate-limiting)). Falta en `/auth/forgot-password`, que dispara emails.
 2. **Recordatorios y apertura nocturna.**
    - Con `REMINDER_HOURS_BEFORE=12` y apertura a las 20:00, una reserva hecha a la noche para una clase de las 08:00 ya entra en la ventana. El recordatorio llega en la siguiente pasada (≤ 10 min).
    - *Mejora:* no recordar reservas hechas hace menos de X horas, o recordar la mañana de la clase.

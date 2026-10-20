@@ -67,7 +67,8 @@ def container(engine, clock, outbox) -> Container:
     with engine.begin() as conn:
         conn.execute(text(f"TRUNCATE {TABLES} CASCADE"))
     settings = Settings(
-        database_url=TEST_DB_URL, event_bus="sync", email_backend="console", jwt_secret="test-secret-with-at-least-32-bytes!!", _env_file=None
+        database_url=TEST_DB_URL, event_bus="sync", email_backend="console", jwt_secret="test-secret-with-at-least-32-bytes!!",
+        rate_limit_storage="memory", _env_file=None
     )
     return build_container(settings, engine=engine, clock=clock, email_sender=outbox)
 
