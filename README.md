@@ -61,6 +61,8 @@ uvicorn --factory pilates.main:create_app --reload
 
 ## Arquitectura
 
+> Documentación técnica completa (diagramas, flujos, modelo de datos, API, errores, configuración): [`doc/technical/TECH.md`](doc/technical/TECH.md).
+
 ```
 src/pilates/
 ├── shared/            Kernel compartido: AggregateRoot, DomainEvent, errores, UnitOfWork, Clock, EventBus
@@ -93,7 +95,7 @@ Todas son configurables por variables de entorno (ver `.env.example`).
 | Regla | Valor por defecto |
 |---|---|
 | Grilla | L–V, 08/09/10/11 hs (mañana) y 15/16/17 hs (tarde), 60 min, 4 lugares |
-| Horizonte de reserva | **Hoy** (clases que no empezaron) y el **siguiente día hábil**. Los turnos del día siguiente se habilitan a las **20:00** del día hábil anterior (`BOOKING_OPENING_TIME`; el viernes 20:00 se abren los del lunes) |
+| Horizonte de reserva | **Hoy** (clases que no empezaron) y el **siguiente día hábil abierto** (los días con cierre se saltean). Los turnos del día siguiente se habilitan a las **20:00** del día hábil anterior (`BOOKING_OPENING_TIME`; el viernes 20:00 se abren los del lunes) |
 | Mismo día | Permitido si quedan lugares y la clase no empezó (`ALLOW_SAME_DAY_BOOKING=true`) |
 | Anticipación mínima | `MIN_BOOKING_ADVANCE_MINUTES=0`. Con 1440 se aplica la regla de "24 h" de la v1 del documento |
 | Cancelación | Hasta **1 h** antes del inicio |
@@ -103,6 +105,7 @@ Todas son configurables por variables de entorno (ver `.env.example`).
 | Reactivar / reabrir | Una clase cancelada se puede **reactivar**. Un cierre (un día o un rango, ej. vacaciones) se **reabre** eliminándolo. Las clases vuelven a estar disponibles y se avisa por email a quienes habían perdido el turno. La reserva no se restaura automáticamente: el lugar pudo haberlo tomado otro alumno |
 | Apertura nocturna | Genera la grilla (idempotente) y avisa a todos los alumnos. Si el día está cerrado, envía el aviso "sin clases" con el próximo día hábil |
 | Recordatorio | 12 h antes de la clase |
+| Reserva por recepción | El admin puede anotar a un alumno salteando ventana y límites: sólo valida el cupo y que la clase no haya terminado. También puede cancelar turnos puntuales |
 | Bloqueo de usuario | No puede loguearse ni reservar. Sus turnos futuros se cancelan y se liberan los cupos |
 | Asistencia | El admin marca `asistio` / `no_asistio` desde el día de la clase. Las estadísticas aparecen en el listado de usuarios |
 
@@ -121,7 +124,8 @@ Todas son configurables por variables de entorno (ver `.env.example`).
 | PATCH | `/admin/clases/{id}` (capacidad, instructor) · POST `/admin/clases/{id}/cancelar` · POST `/admin/clases/{id}/reactivar` | admin |
 | GET/POST | `/admin/cierres` · PUT/DELETE `/admin/cierres/{id}` · DELETE `/admin/cierres?desde=&hasta=` (reabrir rango) · GET `/admin/calendario` | admin |
 | GET | `/admin/asistencia?fecha=` · POST `/admin/turnos/{id}/asistencia` | admin |
-| GET | `/admin/usuarios` · POST `/admin/usuarios/{id}/bloquear` · `/desbloquear` | admin |
+| POST | `/admin/turnos` (reservar en nombre de un alumno: sólo valida cupo y que la clase no haya terminado) · `/admin/turnos/{id}/cancelar` (cancelar un turno puntual, con motivo opcional) | admin |
+| GET/POST | `/admin/usuarios` (listar · alta de alumno con email de bienvenida) · POST `/admin/usuarios/{id}/bloquear` · `/desbloquear` | admin |
 
 Los errores de dominio responden `{"error": "<codigo>", "detail": "<mensaje>"}`. Los códigos HTTP son:
 
