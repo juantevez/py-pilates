@@ -5,7 +5,9 @@ API de reservas para un estudio de Pilates. Está hecha con **FastAPI**, **Postg
 ## Levantar el entorno
 
 ```bash
-cp .env.example .env          # ajustar JWT_SECRET y ADMIN_* como mínimo
+cp .env.example .env
+sed -i "s/^JWT_SECRET=.*/JWT_SECRET=$(openssl rand -hex 32)/" .env   # obligatorio: la API no arranca sin uno propio
+# ajustar también ADMIN_* (y POSTGRES_PASSWORD + DATABASE_URL si se expone el entorno)
 docker compose up -d --build
 ```
 
@@ -14,9 +16,9 @@ docker compose up -d --build
 | `api` | http://localhost:8000/docs (Swagger). Al arrancar corre `alembic upgrade head` y crea el admin inicial. Corre 4 procesos de uvicorn (`WEB_CONCURRENCY`) |
 | `worker` | Celery: procesa los eventos de dominio (envía correos y reacciona a los bloqueos de usuarios) |
 | `beat` | Celery Beat: apertura nocturna (L–V a `BOOKING_OPENING_TIME`) y recordatorios (cada 10 min) |
-| `db` | PostgreSQL 16 |
+| `db` | PostgreSQL 16. Puerto 5432 sólo en `127.0.0.1` (para tests y `psql` desde esta máquina) |
 | `redis` | Broker de Celery |
-| `mailpit` | http://localhost:8025, bandeja para ver los correos en desarrollo |
+| `mailpit` | http://localhost:8025, bandeja para ver los correos en desarrollo. Sólo en `127.0.0.1`: muestra los links de recuperación de contraseña |
 
 Admin inicial: el definido en `ADMIN_EMAIL` / `ADMIN_PASSWORD` (en `.env.example`: `admin@pilates.local` / `admin12345`).
 

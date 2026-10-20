@@ -12,8 +12,14 @@ def _parse_times(value: str | list) -> list[time]:
     return [v if isinstance(v, time) else time.fromisoformat(v) for v in value]
 
 
+# HS256 pide una clave de al menos 256 bits; los valores de ejemplo son públicos (están en el repo).
+MIN_JWT_SECRET_BYTES = 32
+INSECURE_JWT_SECRETS = frozenset({"change-me", "cambiar-por-un-secreto-largo-y-aleatorio"})
+
+
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # hide_input_in_errors: un error de validación no tiene que imprimir secretos en los logs.
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", hide_input_in_errors=True)
 
     app_name: str = "Pilates Studio API"
     environment: Literal["dev", "test", "prod"] = "dev"
@@ -26,7 +32,8 @@ class Settings(BaseSettings):
     db_pool_size: int = 5
     db_max_overflow: int = 10
 
-    jwt_secret: str = "change-me"
+    # Obligatorio: sin un secreto propio cualquiera podría firmar tokens (ver _validate_jwt_secret).
+    jwt_secret: str = ""
     jwt_algorithm: str = "HS256"
     jwt_expires_minutes: int = 60 * 12
 
@@ -85,6 +92,15 @@ class Settings(BaseSettings):
     @classmethod
     def _validate_slots(cls, v: str) -> str:
         _parse_times(v)
+        return v
+
+    @field_validator("jwt_secret")
+    @classmethod
+    def _validate_jwt_secret(cls, v: str) -> str:
+        if v in INSECURE_JWT_SECRETS:
+            raise ValueError("JWT_SECRET no puede ser el valor de ejemplo: generar uno con `openssl rand -hex 32`")
+        if len(v.encode()) < MIN_JWT_SECRET_BYTES:
+            raise ValueError(f"JWT_SECRET tiene que tener al menos {MIN_JWT_SECRET_BYTES} bytes (`openssl rand -hex 32`)")
         return v
 
     @property

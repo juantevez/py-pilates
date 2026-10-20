@@ -97,9 +97,9 @@ flowchart LR
 
 | Servicio | Imagen | Comando | Notas |
 |---|---|---|---|
-| `db` | `postgres:16-alpine` | — | Volumen `pgdata`, `TZ=America/Argentina/Buenos_Aires`, puerto 5432 expuesto |
+| `db` | `postgres:16-alpine` | — | Volumen `pgdata`, `TZ=America/Argentina/Buenos_Aires`, puerto 5432 sólo en `127.0.0.1`. Contraseña en `POSTGRES_PASSWORD` (default `pilates`) |
 | `redis` | `redis:7-alpine` | — | Sólo broker; Celery corre **sin result backend** |
-| `mailpit` | `axllent/mailpit` | — | UI en http://localhost:8025 |
+| `mailpit` | `axllent/mailpit` | — | UI en http://localhost:8025, sólo en `127.0.0.1` (muestra los links de reset) |
 | `api` | `py-pilates:latest` | `api` | `alembic upgrade head` → `pilates.cli create-admin` → `uvicorn --factory pilates.main:create_app --proxy-headers --workers ${WEB_CONCURRENCY}` (4 por defecto en el compose) |
 | `worker` | `py-pilates:latest` | `worker` | `celery worker --concurrency=${WORKER_CONCURRENCY:-2}` |
 | `beat` | `py-pilates:latest` | `beat` | `celery beat --schedule=/tmp/celerybeat-schedule` |
@@ -435,7 +435,7 @@ Todas las variables se leen de `.env` o del entorno con `pydantic-settings` (`co
 | `DATABASE_URL` | `postgresql+psycopg://pilates:pilates@localhost:5432/pilates` | |
 | `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` | `5` / `10` | Pool de SQLAlchemy **por proceso**. Con 4 workers de uvicorn la API puede abrir hasta 60 conexiones; sumadas al worker de Celery tienen que entrar en `max_connections` de Postgres (100) |
 | `REDIS_URL` | `redis://localhost:6379/0` | Broker Celery |
-| `JWT_SECRET` | `change-me` | **Obligatorio cambiar** en producción |
+| `JWT_SECRET` | (vacío) | **Obligatorio.** Al menos 32 bytes y distinto del valor de ejemplo, o la API no arranca. Generarlo con `openssl rand -hex 32`. Cambiarlo invalida todos los tokens |
 | `JWT_ALGORITHM` | `HS256` | |
 | `JWT_EXPIRES_MINUTES` | `720` | 12 h |
 | `TIMEZONE` | `America/Argentina/Buenos_Aires` | Reloj, beat, interpretación de horas de clase |
@@ -493,6 +493,8 @@ Todas las variables se leen de `.env` o del entorno con `pydantic-settings` (`co
 - **Autorización.** Se resuelve en el borde HTTP (`AdminUser`). Las operaciones sobre recursos propios (cancelar un turno) también verifican la pertenencia en el caso de uso.
 - **Auditoría.** Todas las acciones administrativas que modifican datos quedan registradas con `admin_id`.
 - **CORS.** Es configurable. En producción conviene listar los orígenes exactos en lugar de `*`.
+- **Secreto del JWT.** Es obligatorio: la configuración rechaza un `JWT_SECRET` vacío, de menos de 32 bytes o igual a un valor de ejemplo publicado en el repo, y los errores de configuración no muestran el valor (`hide_input_in_errors`).
+- **Puertos.** Sólo la API (8000) escucha en la red. Postgres (5432) y la UI de Mailpit (8025) están atados a `127.0.0.1`: Mailpit muestra los links de recuperación de contraseña, así que abierto a la red permitiría tomar cualquier cuenta.
 - **Contenedor.** Corre con un usuario no root.
 - **Pendientes.** Ver [§21](#21-limitaciones-conocidas-y-mejoras-posibles): HTTPS y rotación del secreto.
 
@@ -678,4 +680,5 @@ Ordenadas por impacto estimado.
 2. **Horizonte de cierres de 90 días.** `closed_dates_from` y `next_open_weekday` miran 90 días hacia adelante. Un cierre continuo más largo no se saltea del todo (caso borde).
 3. **Duplicación menor.** `scheduling.application.services.next_open_day` (consulta por día) y `calendar.next_open_weekday` (sobre un conjunto en memoria) resuelven lo mismo. Se podrían unificar.
 4. **Pool y sesiones.** Engine síncrono con pool de 5 + 10 por proceso (configurable). Con 4 workers de uvicorn y el worker de Celery el máximo teórico ronda las 90 conexiones, cerca del límite de 100 de Postgres; si se suman workers, bajar `DB_MAX_OVERFLOW` o usar PgBouncer.
-5. **Sin observabilidad estructurada.** Hay logs de texto, sin métricas ni tracing. Los resultados de Celery no se guardan (`backend=None`). *Mejora:* logs JSON, Flower o métricas de Celery, y un healthcheck que incluya la base y Redis.
+5. **Sin HTTPS ni rotación del secreto.** La API y el front se sirven por HTTP, así que en la red el token y las contraseñas viajan en claro. *Mejora:* un proxy con TLS (Caddy o nginx) delante de los dos. El `JWT_SECRET` es uno solo: rotarlo cierra todas las sesiones a la vez. *Mejora:* aceptar el anterior durante 12 h (`kid` en el header del JWT).
+6. **Sin observabilidad estructurada.** Hay logs de texto, sin métricas ni tracing. Los resultados de Celery no se guardan (`backend=None`). *Mejora:* logs JSON, Flower o métricas de Celery, y un healthcheck que incluya la base y Redis.

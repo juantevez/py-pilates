@@ -14,13 +14,13 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: pilates
-      POSTGRES_PASSWORD: pilates
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pilates}   # en .env; tiene que coincidir con DATABASE_URL
       POSTGRES_DB: pilates
       TZ: America/Argentina/Buenos_Aires
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"   # sólo desde esta máquina (tests y psql); los contenedores usan la red interna
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U pilates -d pilates"]
       interval: 5s
@@ -38,7 +38,7 @@ services:
   mailpit:
     image: axllent/mailpit:latest
     ports:
-      - "8025:8025"   # UI web para ver los correos en desarrollo
+      - "127.0.0.1:8025:8025"   # UI de los correos, sólo desde esta máquina: muestra los links de reset
     restart: unless-stopped
 
   api:
