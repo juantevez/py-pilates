@@ -116,7 +116,7 @@ Todas son configurables por variables de entorno (ver `.env.example`).
 | Método | Ruta | Rol |
 |---|---|---|
 | POST | `/auth/register`, `/auth/login`, `/auth/forgot-password`, `/auth/reset-password` | público |
-| GET | `/auth/me` | autenticado |
+| GET | `/auth/me` · POST `/auth/logout` (cierra la sesión de este dispositivo) | autenticado |
 | GET | `/calendario?desde=&hasta=` | alumno: días con/sin clases y cierres con etiqueta ("Feriado - Sin clases"). Por defecto hoy + 30 días |
 | GET | `/clases/disponibles` | alumno: hoy y el próximo día hábil, cada uno con `estado` (`abierta` / `pendiente_apertura` / `cerrado` / `sin_clases`), cupos y flags `puede_reservar` / `puede_cancelar` / `puede_anotarse_lista_espera` |
 | POST | `/turnos` · `/turnos/{id}/cancelar` | alumno |

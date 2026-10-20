@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from datetime import datetime
 from uuid import UUID
 
 from pilates.identity.application.dto import UserSummary
@@ -17,11 +18,18 @@ class PasswordHasher(ABC):
 class AccessTokenClaims:
     user_id: UUID
     role: str
+    session_id: UUID
+
+
+@dataclass(frozen=True)
+class IssuedToken:
+    token: str
+    expires_at: datetime
 
 
 class TokenService(ABC):
     @abstractmethod
-    def issue(self, user_id: UUID, role: str) -> str: ...
+    def issue(self, user_id: UUID, role: str, session_id: UUID) -> IssuedToken: ...
 
     @abstractmethod
     def decode(self, token: str) -> AccessTokenClaims: ...

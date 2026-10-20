@@ -114,3 +114,24 @@ class PasswordResetToken(AggregateRoot):
         if not self.is_valid(now):
             raise BusinessRuleViolation("El enlace de recuperación es inválido o expiró", code="invalid_reset_token")
         self.used_at = now
+
+
+@dataclass(eq=False, kw_only=True)
+class Sesion(AggregateRoot):
+    """Un login en un dispositivo. El JWT lleva su id (``sid``); el vencimiento lo controla el
+    propio token, la sesión sirve para revocarlo antes (cerrar sesión, cambio de contraseña)."""
+
+    id: UUID = field(default_factory=uuid4)
+    user_id: UUID
+    created_at: datetime
+    expires_at: datetime
+    revoked_at: datetime | None = None
+    revoke_reason: str | None = None
+
+    @property
+    def is_revoked(self) -> bool:
+        return self.revoked_at is not None
+
+    def revoke(self, now: datetime, reason: str) -> None:
+        if not self.is_revoked:
+            self.revoked_at, self.revoke_reason = now, reason

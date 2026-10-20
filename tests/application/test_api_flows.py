@@ -304,7 +304,10 @@ def test_block_user_cancels_future_bookings(api: Api):
 
     r = api.client.post(f"/admin/usuarios/{user_id}/bloquear", json={"motivo": "Moroso"}, headers=admin)
     assert r.json()["status"] == "bloqueado"
-    assert api.client.get("/auth/me", headers=h).status_code == 403
+    # El bloqueo cierra sus sesiones; al intentar volver a ingresar ve el motivo.
+    assert api.client.get("/auth/me", headers=h).json()["error"] == "session_revoked"
+    relogin = api.client.post("/auth/login", json={"email": "ana@test.com", "password": "secreta123"})
+    assert relogin.status_code == 403 and relogin.json()["error"] == "user_blocked"
     classes = api.client.get("/admin/clases", params={"fecha": TUESDAY}, headers=admin).json()
     assert next(c for c in classes if c["id"] == ids["08:00"])["reservados"] == 0
 

@@ -6,7 +6,7 @@ from pydantic import BaseModel, EmailStr, Field
 
 from pilates.identity.application.dto import UserDTO, UserSummary
 from pilates.shared.domain.errors import AuthenticationError
-from pilates.shared.http.deps import AdminUser, ContainerDep, CurrentUser
+from pilates.shared.http.deps import AdminUser, ClaimsDep, ContainerDep, CurrentUser
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 admin_router = APIRouter(prefix="/admin/usuarios", tags=["admin: usuarios"])
@@ -76,6 +76,12 @@ def login(body: LoginRequest, request: Request, c: ContainerDep):
         raise
     limiter.reset(failures)
     return TokenResponse(access_token=result.access_token, user=result.user)
+
+
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+def logout(c: ContainerDep, _: CurrentUser, claims: ClaimsDep) -> None:
+    """Cierra la sesión de este dispositivo: el token deja de servir aunque no haya vencido."""
+    c.logout.execute(session_id=claims.session_id)
 
 
 @router.post("/forgot-password", status_code=status.HTTP_202_ACCEPTED)

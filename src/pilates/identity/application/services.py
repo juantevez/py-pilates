@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import timedelta
-from uuid import UUID
+from datetime import UTC, datetime, timedelta
+from uuid import UUID, uuid4
 
 from pilates.identity.application.dto import AuthResult, UserDTO, UserSummary
 from pilates.identity.application.ports import PasswordHasher, SecretTokenGenerator, TokenService
 from pilates.identity.domain.events import PasswordResetRequested, UserInvited
-from pilates.identity.domain.model import Email, PasswordResetToken, Role, User
+from pilates.identity.domain.model import Email, PasswordResetToken, Role, Sesion, User
 from pilates.shared.application.ports import Clock
 from pilates.shared.application.unit_of_work import UnitOfWork
 from pilates.shared.domain.errors import (
@@ -102,8 +102,12 @@ class CreateUserByAdmin:
 
 
 class Login:
-    def __init__(self, uow: UowFactory, hasher: PasswordHasher, tokens: TokenService) -> None:
-        self._uow, self._hasher, self._tokens = uow, hasher, tokens
+    """Cada login abre una sesión (un dispositivo) que se puede revocar sin esperar a que venza el token."""
+
+    PURGE_AFTER = timedelta(days=1)
+
+    def __init__(self, uow: UowFactory, hasher: PasswordHasher, tokens: TokenService, clock: Clock) -> None:
+        self._uow, self._hasher, self._tokens, self._clock = uow, hasher, tokens, clock
 
     def execute(self, *, email: str, password: str) -> AuthResult:
         try:
@@ -115,20 +119,44 @@ class Login:
             if user is None or not self._hasher.verify(password, user.password_hash):
                 raise AuthenticationError("Credenciales inválidas")
             user.ensure_active()
-            return AuthResult(access_token=self._tokens.issue(user.id, user.role.value), user=to_dto(user))
+            sesion_id = uuid4()
+            issued = self._tokens.issue(user.id, user.role.value, sesion_id)
+            uow.sesiones.purge_expired(user.id, before=datetime.now(UTC) - self.PURGE_AFTER)
+            uow.sesiones.add(
+                Sesion(id=sesion_id, user_id=user.id, created_at=self._clock.now(), expires_at=issued.expires_at)
+            )
+            uow.commit()
+            return AuthResult(access_token=issued.token, user=to_dto(user))
 
 
 class GetCurrentUser:
     def __init__(self, uow: UowFactory) -> None:
         self._uow = uow
 
-    def execute(self, user_id: UUID) -> UserDTO:
+    def execute(self, user_id: UUID, session_id: UUID) -> UserDTO:
         with self._uow() as uow:
+            sesion = uow.sesiones.get(session_id)
+            if sesion is None or sesion.user_id != user_id or sesion.is_revoked:
+                raise AuthenticationError("La sesión se cerró. Volvé a ingresar.", code="session_revoked")
             user = uow.users.get(user_id)
             if user is None:
                 raise AuthenticationError("Usuario inexistente")
             user.ensure_active()
             return to_dto(user)
+
+
+class Logout:
+    """Cierra la sesión de este dispositivo; las de otros dispositivos siguen activas."""
+
+    def __init__(self, uow: UowFactory, clock: Clock) -> None:
+        self._uow, self._clock = uow, clock
+
+    def execute(self, *, session_id: UUID) -> None:
+        with self._uow() as uow:
+            if sesion := uow.sesiones.get(session_id):
+                sesion.revoke(self._clock.now(), "logout")
+                uow.sesiones.save(sesion)
+            uow.commit()
 
 
 class RequestPasswordReset:
@@ -184,12 +212,14 @@ class ResetPassword:
             user.change_password(self._hasher.hash(new_password))
             uow.reset_tokens.save(stored)
             uow.users.save(user)
+            # Quien tenía la contraseña vieja (o un token robado) queda afuera en todos los dispositivos.
+            uow.sesiones.revoke_all_for_user(user.id, self._clock.now(), "password_reset")
             uow.commit()
 
 
 class BlockUser:
-    def __init__(self, uow: UowFactory) -> None:
-        self._uow = uow
+    def __init__(self, uow: UowFactory, clock: Clock) -> None:
+        self._uow, self._clock = uow, clock
 
     def execute(self, *, admin_id: UUID, user_id: UUID, reason: str) -> UserDTO:
         with self._uow() as uow:
@@ -198,6 +228,7 @@ class BlockUser:
                 raise NotFoundError("Usuario inexistente")
             user.block(reason)
             uow.users.save(user)
+            uow.sesiones.revoke_all_for_user(user.id, self._clock.now(), "blocked")
             uow.audit.record(admin_id, "user.blocked", {"user_id": str(user_id), "reason": reason})
             uow.commit()
             return to_dto(user)
