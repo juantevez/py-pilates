@@ -462,7 +462,7 @@ stateDiagram-v2
 | `UpdateClase` | Capacidad y/o instructor, con lock de la clase. Audit `class.updated` |
 | `CancelClase` | Sólo antes del inicio (`class_already_started`). `release_class_bookings` cancela los turnos en la misma transacción y vacía la lista de espera. Audit `class.cancelled` |
 | `ReactivateClase` | Sólo antes del inicio y si el día no tiene cierre (`day_closed`). Emite `ClasesReabiertas` |
-| `CreateCierres(desde, hasta?, tipo, motivo)` | Rango ≤ 366 días, sin pasado, sólo días hábiles (`invalid_range`). Falla entero si algún día ya tiene cierre (`closure_exists`). Por día: crea cierre, pasa clases a `feriado`, cancela turnos. Audit `closure.created` por día |
+| `CreateCierres(desde, hasta?, tipo, motivo)` | Rango ≤ 366 días, sin pasado, sólo días hábiles (`invalid_range`). Falla entero si algún día ya tiene cierre (`closure_exists`). Por día: crea cierre, pasa clases a `feriado`, cancela turnos. Audit `closure.created` por día. Si el día **ya estaba habilitado** (hoy, o la apertura nocturna ya pasó), avisa `DiaSinClases` a los demás alumnos en el momento; y si el cierre adelanta el próximo día reservable, genera su grilla y avisa `TurnosHabilitados` (ver [§10.4](#104-carga-y-eliminación-de-cierres)) |
 | `UpdateCierre` | Cambia tipo/motivo. Audit `closure.updated` |
 | `DeleteCierre.execute(cierre_id)` / `.execute_range(desde, hasta)` | Elimina y reabre. Si el día ya tenía grilla **o** queda dentro del horizonte reservable, llama a `ensure_daily_grid`. Emite `ClasesReabiertas` con los ids reabiertos. Audit `closure.deleted` |
 | `ListCierres`, `GetCalendar` (admin, ≤ 92 días) | Read models |
@@ -627,7 +627,19 @@ Consultas (read models):
 
 ## 8. Contexto `notifications`
 
-`NotificationHandlers` reacciona a eventos y envía emails a través del puerto `EmailSender`. Hay dos adaptadores: `SmtpEmailSender` (timeout de 15 s, STARTTLS y login opcionales) y `ConsoleEmailSender` (loguea el mail y lo guarda en `outbox`; se usa en tests).
+`NotificationHandlers` reacciona a eventos y **encola** los correos: no habla con el SMTP. Por cada destinatario agrega un evento `CorreoSolicitado(to, subject, body)` a la UnitOfWork y hace commit, así cada correo queda como una fila propia del outbox. El único que envía es `DeliverEmail` (handler `notifications.enviar_correo`), a través del puerto `EmailSender`.
+
+```mermaid
+flowchart LR
+    E["TurnosHabilitados<br/>(1 fila del outbox)"] --> H[on_turnos_habilitados]
+    H -- "1 transacción" --> C1["CorreoSolicitado → a@"] & C2["CorreoSolicitado → b@"] & C3["CorreoSolicitado → c@"]
+    C1 & C2 & C3 --> D[DeliverEmail → SMTP]
+```
+
+- **Ventaja:** si el SMTP rechaza un correo, sólo esa fila suma un intento y se reintenta. Los demás destinatarios no lo reciben dos veces.
+- **Marcas atómicas:** las marcas de "ya avisado" (`lista_espera.notified_at`, `turnos.reminder_sent_at`) se guardan en la misma transacción que los correos encolados.
+
+Hay dos adaptadores de `EmailSender`: `SmtpEmailSender` (timeout de 15 s, STARTTLS y login opcionales) y `ConsoleEmailSender` (loguea el mail y lo guarda en su lista `outbox`; se usa en tests).
 
 | Evento | Handler | Destinatarios | Plantilla (asunto) |
 |---|---|---|---|
@@ -637,11 +649,11 @@ Consultas (read models):
 | `TurnoCancelado` (cualquiera) | `on_turno_cancelado` | **toda** la lista de espera (no bloqueados), si la clase está activa, no empezó y quedó lugar | "¡Se liberó un lugar! …" + link `/clases/{id}`; marca `notified_at` |
 | `ClasesReabiertas` | `on_clases_reabiertas` | alumnos con turnos `cancelled_with_class` en esas clases (agrupado por alumno) | "¡Buenas noticias! …" + link `/reservar` |
 | `TurnosHabilitados` | `on_turnos_habilitados` | todos los alumnos activos | "Ya podés reservar tus turnos del {fecha}" |
-| `DiaSinClases` | `on_dia_sin_clases` | todos los alumnos activos | "Sin clases el {fecha}" (con el próximo día hábil) |
+| `DiaSinClases` | `on_dia_sin_clases` | todos los alumnos activos, menos `excluir_user_ids` (los que ya reciben la cancelación de su turno) | "Sin clases el {fecha}" (con el próximo día hábil) |
 | `PasswordResetRequested` | `on_password_reset_requested` | el usuario | "Recuperación de contraseña" |
 | `UserInvited` | `on_user_invited` | el alumno nuevo | "Bienvenido/a al estudio de Pilates" |
 
-**`SendClassReminders`** corre como tarea periódica cada 10 minutos. Busca los turnos `confirmada` sin recordatorio, de clases activas, que empiezan dentro de `[now, now + REMINDER_HOURS_BEFORE]`. Los toma con `FOR UPDATE SKIP LOCKED`, para que dos ejecuciones simultáneas no manden duplicados. Envía el recordatorio y marca `reminder_sent_at`.
+**`SendClassReminders`** corre como tarea periódica cada 10 minutos. Busca los turnos `confirmada` sin recordatorio, de clases activas, que empiezan dentro de `[now, now + REMINDER_HOURS_BEFORE]`. Los toma con `FOR UPDATE SKIP LOCKED`, para que dos ejecuciones simultáneas no manden duplicados. Encola el recordatorio y marca `reminder_sent_at` en la misma transacción. Si el SMTP falla, sólo se reintenta ese correo y la próxima pasada no reenvía los que ya salieron.
 
 Las plantillas (`templates.py`) son texto plano en español rioplatense y escriben las fechas largas a mano, por ejemplo "miércoles 21 de octubre", sin depender del locale.
 
@@ -824,6 +836,15 @@ sequenceDiagram
     end
 ```
 
+¿Quién se entera de un cierre?
+
+| Momento en que se carga | Alumnos con turno ese día | Resto de los alumnos |
+|---|---|---|
+| Antes de la apertura del día (ej. el lunes 18:00 cierra el martes) | "Clase cancelada: …" (sólo si un admin les había reservado) | "Sin clases el …" en el job de las 20:00 |
+| Con el día ya habilitado (ej. el lunes 21:00 cierra el martes, o cierra hoy) | "Clase cancelada: …" con el motivo | "Sin clases el …" en el momento |
+
+En el segundo caso el cierre puede adelantar el próximo día reservable: si el lunes 21:00 se cierra el martes, el miércoles queda habilitado de inmediato (su apertura pasa a ser el lunes 20:00). Se genera su grilla y se envía "Ya podés reservar tus turnos del miércoles…", porque el job del martes no lo va a anunciar.
+
 Las reservas canceladas **no se restauran** al reabrir, porque el lugar pudo haberlo tomado otro alumno. Lo que se hace es avisar a los afectados para que vuelvan a reservar.
 
 ### 10.5 Alta de alumno por recepción
@@ -921,9 +942,10 @@ Hay dos tests que lo verifican en `tests/application/test_concurrency.py`. Lanza
 | `PasswordResetRequested` | `RequestPasswordReset` | `user_id`, `reset_url` | `notifications.reset_password` |
 | `TurnoReservado` | `Turno.reserve` / `rebook` | `turno_id`, `user_id`, `clase_id` | `notifications.confirmacion` |
 | `TurnoCancelado` | `Turno._cancel` | `turno_id`, `user_id`, `clase_id`, `por`, `motivo`, `con_clase` | `notifications.cancelacion_y_lista_espera` |
-| `TurnosHabilitados` | `GenerateDailyClasses` | `fecha` | `notifications.apertura` |
-| `DiaSinClases` | `GenerateDailyClasses` | `fecha`, `motivo`, `proximo_dia_habil` | `notifications.dia_sin_clases` |
+| `TurnosHabilitados` | `GenerateDailyClasses`, `CreateCierres` | `fecha` | `notifications.apertura` |
+| `DiaSinClases` | `GenerateDailyClasses`, `CreateCierres` | `fecha`, `motivo`, `proximo_dia_habil`, `excluir_user_ids` | `notifications.dia_sin_clases` |
 | `ClasesReabiertas` | `ReactivateClase`, `DeleteCierre`, `GenerateDailyClasses` | `clase_ids` | `notifications.clases_reabiertas` |
+| `CorreoSolicitado` | handlers de `notifications`, `SendClassReminders` | `to`, `subject`, `body` | `notifications.enviar_correo` |
 
 Todos heredan `occurred_at`.
 
@@ -989,7 +1011,7 @@ sequenceDiagram
 | `RELAY_BATCH` | 500 | Filas por pasada |
 | `RETENTION` | 7 días | Se borran las filas procesadas más viejas |
 
-Garantía: **al menos una vez**. Un handler se puede repetir si el proceso muere entre que termina y se marca `processed_at`; los handlers actuales sólo mandan emails, así que el peor caso es un mail duplicado.
+Garantía: **al menos una vez**. Un handler se puede repetir si el proceso muere entre que termina y se marca `processed_at`; como cada fila de `notifications.enviar_correo` es un único correo, el peor caso es que **un** destinatario reciba un mail repetido.
 
 Para ver qué quedó trabado:
 
@@ -1356,7 +1378,7 @@ La regla general es que el front **no duplica reglas de negocio**: decide qué b
 
 ```bash
 docker compose up -d db          # los tests crean y usan la base pilates_test
-.venv/bin/pytest                 # 56 tests
+.venv/bin/pytest                 # 59 tests
 ```
 
 | Carpeta | Tipo | Qué cubre |
@@ -1364,8 +1386,8 @@ docker compose up -d db          # los tests crean y usan la base pilates_test
 | `tests/unit/test_calendar.py` | Unitario (dominio puro) | Días hábiles, target, ventana, mismo día, grilla, **salteo de días cerrados** |
 | `tests/unit/test_booking_domain.py` | Unitario | Política (cupo, ventana, límites), estados del turno, rebook, reglas de reactivación, reserva y cancelación admin, `cancelled_with_class` |
 | `tests/unit/test_identity_domain.py` | Unitario | Email, bloqueo, admin no bloqueable, token de un solo uso |
-| `tests/application/test_api_flows.py` | Integración (TestClient + Postgres real) | Flujos end-to-end por HTTP: registro y login, apertura, cupo y lista de espera, límites, ventana de cancelación, cierres, job nocturno (incluido "mañana cerrado → abre el siguiente"), asistencia, recordatorios, bloqueo, reset, calendario, reactivación, rangos de vacaciones, alta por admin, reserva y cancelación admin, cupo con asistencia marcada |
-| `tests/application/test_outbox.py` | Integración | El evento sobrevive a Redis caído y el relay lo entrega; un handler fallido queda pendiente y se reintenta; el despacho es idempotente; las filas que agotaron reintentos no se reenvían |
+| `tests/application/test_api_flows.py` | Integración (TestClient + Postgres real) | Flujos end-to-end por HTTP: registro y login, apertura, cupo y lista de espera, límites, ventana de cancelación, cierres (incluido cerrar un día ya habilitado: aviso general y apertura del siguiente), job nocturno (incluido "mañana cerrado → abre el siguiente"), asistencia, recordatorios, bloqueo, reset, calendario, reactivación, rangos de vacaciones, alta por admin, reserva y cancelación admin, cupo con asistencia marcada |
+| `tests/application/test_outbox.py` | Integración | El evento sobrevive a Redis caído y el relay lo entrega; un handler fallido queda pendiente y se reintenta; el despacho es idempotente; las filas que agotaron reintentos no se reenvían; en un envío masivo o en los recordatorios, un fallo de SMTP sólo reintenta al destinatario que falló |
 | `tests/application/test_concurrency.py` | Integración con hilos | Nunca se supera el cupo (alumnos, y alumnos + admin) |
 
 En `conftest.py`:
@@ -1453,19 +1475,16 @@ EVENT_BUS=sync EMAIL_BACKEND=console uvicorn --factory pilates.main:create_app -
 
 Ordenadas por impacto estimado.
 
-1. **Reintentos de handlers masivos.**
-   - `on_turnos_habilitados`, `on_dia_sin_clases` y el aviso a la lista de espera mandan N emails dentro de una sola fila del outbox. Si el SMTP falla a mitad, el reintento reenvía a quienes ya lo habían recibido.
-   - *Mejora:* una tarea por destinatario, o registrar el envío para que sea idempotente.
-2. **Throughput de autenticación.** bcrypt corre en un único proceso uvicorn. *Mejoras:*
+1. **Throughput de autenticación.** bcrypt corre en un único proceso uvicorn. *Mejoras:*
    - `uvicorn --workers N` (o gunicorn con workers uvicorn).
    - Ajustar el pool de SQLAlchemy a `workers × hilos`.
    - Rate limiting en `/auth/login`, `/auth/register` y `/auth/forgot-password`.
-3. **Recordatorios y apertura nocturna.**
+2. **Recordatorios y apertura nocturna.**
    - Con `REMINDER_HOURS_BEFORE=12` y apertura a las 20:00, una reserva hecha a la noche para una clase de las 08:00 ya entra en la ventana. El recordatorio llega en la siguiente pasada (≤ 10 min).
    - *Mejora:* no recordar reservas hechas hace menos de X horas, o recordar la mañana de la clase.
-4. **Lista de espera sin prioridad.** Se avisa a todos y gana el más rápido. Es lo que se decidió, pero no hay reserva temporal para el primero de la lista.
-5. **JWT sin revocación ni refresh.** El logout sólo borra el token del cliente. La consulta del usuario en cada request mitiga el caso de bloqueo, a costa de una query por request.
-6. **Horizonte de cierres de 90 días.** `closed_dates_from` y `next_open_weekday` miran 90 días hacia adelante. Un cierre continuo más largo no se saltea del todo (caso borde).
-7. **Duplicación menor.** `scheduling.application.services.next_open_day` (consulta por día) y `calendar.next_open_weekday` (sobre un conjunto en memoria) resuelven lo mismo. Se podrían unificar.
-8. **Pool y sesiones.** Engine síncrono con el pool por defecto (5 + 10). Con varios workers de uvicorn hay que dimensionarlo junto con `max_connections` de Postgres.
-9. **Sin observabilidad estructurada.** Hay logs de texto, sin métricas ni tracing. Los resultados de Celery no se guardan (`backend=None`). *Mejora:* logs JSON, Flower o métricas de Celery, y un healthcheck que incluya la base y Redis.
+3. **Lista de espera sin prioridad.** Se avisa a todos y gana el más rápido. Es lo que se decidió, pero no hay reserva temporal para el primero de la lista.
+4. **JWT sin revocación ni refresh.** El logout sólo borra el token del cliente. La consulta del usuario en cada request mitiga el caso de bloqueo, a costa de una query por request.
+5. **Horizonte de cierres de 90 días.** `closed_dates_from` y `next_open_weekday` miran 90 días hacia adelante. Un cierre continuo más largo no se saltea del todo (caso borde).
+6. **Duplicación menor.** `scheduling.application.services.next_open_day` (consulta por día) y `calendar.next_open_weekday` (sobre un conjunto en memoria) resuelven lo mismo. Se podrían unificar.
+7. **Pool y sesiones.** Engine síncrono con el pool por defecto (5 + 10). Con varios workers de uvicorn hay que dimensionarlo junto con `max_connections` de Postgres.
+8. **Sin observabilidad estructurada.** Hay logs de texto, sin métricas ni tracing. Los resultados de Celery no se guardan (`backend=None`). *Mejora:* logs JSON, Flower o métricas de Celery, y un healthcheck que incluya la base y Redis.

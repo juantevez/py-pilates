@@ -8,6 +8,7 @@ from pilates.booking.domain.events import TurnoCancelado, TurnoReservado
 from pilates.booking.domain.model import CanceladoPor
 from pilates.identity.domain.events import PasswordResetRequested, UserInvited
 from pilates.notifications.application import templates
+from pilates.notifications.application.events import CorreoSolicitado
 from pilates.notifications.application.ports import EmailMessage, EmailSender
 from pilates.scheduling.domain.events import ClasesReabiertas, DiaSinClases, TurnosHabilitados
 from pilates.shared.application.ports import Clock
@@ -17,32 +18,44 @@ logger = logging.getLogger(__name__)
 UowFactory = Callable[[], UnitOfWork]
 
 
+def queue_email(uow: UnitOfWork, to: str, content: tuple[str, str]) -> None:
+    """Encola un correo en el outbox (se envía tras el commit, uno por fila)."""
+    subject, body = content
+    uow.add_event(CorreoSolicitado(to=to, subject=subject, body=body))
+
+
+class DeliverEmail:
+    """Handler de CorreoSolicitado: el único que habla con el SMTP."""
+
+    def __init__(self, sender: EmailSender) -> None:
+        self._sender = sender
+
+    def __call__(self, event: CorreoSolicitado) -> None:
+        self._sender.send(EmailMessage(to=event.to, subject=event.subject, body=event.body))
+
+
 class NotificationHandlers:
-    """Reacciona a eventos de dominio enviando correos."""
+    """Reacciona a eventos de dominio encolando correos."""
 
     def __init__(
         self,
         uow: UowFactory,
-        sender: EmailSender,
         clock: Clock,
         frontend_url: str,
         reset_ttl_minutes: int,
         invite_ttl_hours: int,
     ) -> None:
-        self._uow, self._sender, self._clock = uow, sender, clock
+        self._uow, self._clock = uow, clock
         self._frontend_url = frontend_url.rstrip("/")
         self._reset_ttl_minutes = reset_ttl_minutes
         self._invite_ttl_hours = invite_ttl_hours
-
-    def _send(self, to: str, content: tuple[str, str]) -> None:
-        subject, body = content
-        self._sender.send(EmailMessage(to=to, subject=subject, body=body))
 
     def on_turno_reservado(self, event: TurnoReservado) -> None:
         with self._uow() as uow:
             user, clase = uow.users.get(event.user_id), uow.clases.get(event.clase_id)
             if user and clase:
-                self._send(str(user.email), templates.confirmacion(user.full_name, clase.fecha, clase.start_time))
+                queue_email(uow, str(user.email), templates.confirmacion(user.full_name, clase.fecha, clase.start_time))
+            uow.commit()
 
     def on_turno_cancelado(self, event: TurnoCancelado) -> None:
         now = self._clock.now()
@@ -52,20 +65,19 @@ class NotificationHandlers:
                 return
             if event.por == CanceladoPor.GIMNASIO.value and (user := uow.users.get(event.user_id)):
                 template = templates.cancelacion_gimnasio if event.con_clase else templates.turno_cancelado_gimnasio
-                self._send(str(user.email), template(user.full_name, clase.fecha, clase.start_time, event.motivo))
+                queue_email(uow, str(user.email), template(user.full_name, clase.fecha, clase.start_time, event.motivo))
             # Aviso de liberación a la lista de espera (gana el primero que reserva).
-            if not clase.is_active or clase.starts_at(now.tzinfo) <= now:
-                return
-            if uow.turnos.count_occupied(clase.id) >= clase.max_capacity:
-                return
-            url = f"{self._frontend_url}/clases/{clase.id}"
-            for entry in uow.waitlist.list_by_clase(clase.id):
-                waiting = uow.users.get(entry.user_id)
-                if waiting is None or waiting.is_blocked:
-                    continue
-                self._send(str(waiting.email), templates.lugar_liberado(waiting.full_name, clase.fecha, clase.start_time, url))
-                entry.mark_notified(now)
-                uow.waitlist.save(entry)
+            if clase.is_active and clase.starts_at(now.tzinfo) > now and uow.turnos.count_occupied(clase.id) < clase.max_capacity:
+                url = f"{self._frontend_url}/clases/{clase.id}"
+                for entry in uow.waitlist.list_by_clase(clase.id):
+                    waiting = uow.users.get(entry.user_id)
+                    if waiting is None or waiting.is_blocked:
+                        continue
+                    queue_email(
+                        uow, str(waiting.email), templates.lugar_liberado(waiting.full_name, clase.fecha, clase.start_time, url)
+                    )
+                    entry.mark_notified(now)
+                    uow.waitlist.save(entry)
             uow.commit()
 
     def on_clases_reabiertas(self, event: ClasesReabiertas) -> None:
@@ -83,40 +95,55 @@ class NotificationHandlers:
             for user_id, clases in per_user.items():
                 user = uow.users.get(user_id)
                 if user and not user.is_blocked:
-                    self._send(str(user.email), templates.clases_reabiertas(user.full_name, clases, url))
+                    queue_email(uow, str(user.email), templates.clases_reabiertas(user.full_name, clases, url))
+            uow.commit()
 
     def on_turnos_habilitados(self, event: TurnosHabilitados) -> None:
+        url = f"{self._frontend_url}/reservar"
         with self._uow() as uow:
             students = uow.user_queries.active_students()
-        url = f"{self._frontend_url}/reservar"
-        for s in students:
-            self._send(s.email, templates.turnos_habilitados(s.full_name, event.fecha, url))
-        logger.info("Apertura de turnos %s notificada a %d alumnos", event.fecha, len(students))
+            for s in students:
+                queue_email(uow, s.email, templates.turnos_habilitados(s.full_name, event.fecha, url))
+            uow.commit()
+        logger.info("Apertura de turnos %s: %d correos encolados", event.fecha, len(students))
 
     def on_dia_sin_clases(self, event: DiaSinClases) -> None:
+        excluded = set(event.excluir_user_ids)
         with self._uow() as uow:
-            students = uow.user_queries.active_students()
-        for s in students:
-            self._send(s.email, templates.dia_sin_clases(s.full_name, event.fecha, event.motivo, event.proximo_dia_habil))
+            for s in uow.user_queries.active_students():
+                if s.id in excluded:
+                    continue
+                queue_email(
+                    uow, s.email, templates.dia_sin_clases(s.full_name, event.fecha, event.motivo, event.proximo_dia_habil)
+                )
+            uow.commit()
 
     def on_password_reset_requested(self, event: PasswordResetRequested) -> None:
         with self._uow() as uow:
-            user = uow.users.get(event.user_id)
-        if user:
-            self._send(str(user.email), templates.reset_password(user.full_name, event.reset_url, self._reset_ttl_minutes))
+            if user := uow.users.get(event.user_id):
+                queue_email(
+                    uow, str(user.email), templates.reset_password(user.full_name, event.reset_url, self._reset_ttl_minutes)
+                )
+            uow.commit()
 
     def on_user_invited(self, event: UserInvited) -> None:
         with self._uow() as uow:
-            user = uow.users.get(event.user_id)
-        if user:
-            self._send(str(user.email), templates.bienvenida(user.full_name, event.set_password_url, self._invite_ttl_hours))
+            if user := uow.users.get(event.user_id):
+                queue_email(
+                    uow, str(user.email), templates.bienvenida(user.full_name, event.set_password_url, self._invite_ttl_hours)
+                )
+            uow.commit()
 
 
 class SendClassReminders:
-    """Tarea periódica: recordatorio N horas antes de la clase (reduce el no-show)."""
+    """Tarea periódica: recordatorio N horas antes de la clase (reduce el no-show).
 
-    def __init__(self, uow: UowFactory, sender: EmailSender, clock: Clock, hours_before: int) -> None:
-        self._uow, self._sender, self._clock = uow, sender, clock
+    Marca el turno y encola el correo en la misma transacción: un fallo de SMTP no hace que
+    la próxima pasada reenvíe los recordatorios que ya salieron.
+    """
+
+    def __init__(self, uow: UowFactory, clock: Clock, hours_before: int) -> None:
+        self._uow, self._clock = uow, clock
         self._window = timedelta(hours=hours_before)
 
     def execute(self) -> int:
@@ -127,8 +154,7 @@ class SendClassReminders:
                 user, clase = uow.users.get(turno.user_id), uow.clases.get(turno.clase_id)
                 if user is None or clase is None:
                     continue
-                subject, body = templates.recordatorio(user.full_name, clase.fecha, clase.start_time)
-                self._sender.send(EmailMessage(to=str(user.email), subject=subject, body=body))
+                queue_email(uow, str(user.email), templates.recordatorio(user.full_name, clase.fecha, clase.start_time))
                 turno.mark_reminder_sent(now)
                 uow.turnos.save(turno)
                 sent += 1
