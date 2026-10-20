@@ -1,5 +1,6 @@
 import logging
 from functools import lru_cache
+from uuid import UUID
 
 from pilates.bootstrap import Container, build_container
 from pilates.config import get_settings
@@ -13,10 +14,22 @@ def container() -> Container:
     return build_container(get_settings())
 
 
+@celery_app.task(name="pilates.dispatch_outbox", autoretry_for=(Exception,), retry_backoff=True, max_retries=5)
+def dispatch_outbox(message_id: str) -> bool:
+    """Procesa una fila del outbox (un evento para un handler). Idempotente."""
+    return container().outbox_dispatcher.dispatch(UUID(message_id))
+
+
+@celery_app.task(name="pilates.relay_outbox")
+def relay_outbox() -> int:
+    return container().relay_outbox.execute()
+
+
 @celery_app.task(
     name="pilates.dispatch_event", bind=True, autoretry_for=(Exception,), retry_backoff=True, max_retries=5
 )
 def dispatch_event(self, event_name: str, handler_name: str, payload: dict) -> None:
+    """Formato anterior al outbox: procesa los mensajes que quedaron encolados durante el deploy."""
     c = container()
     event = c.registry.deserialize(event_name, payload)
     c.registry.handler(event_name, handler_name)(event)

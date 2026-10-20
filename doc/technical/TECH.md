@@ -1,6 +1,6 @@
 # Pilates Studio: documentación técnica
 
-> Estado: octubre 2026 (commit `63d866c`, migración `b5d2f8e1c4a7`).
+> Estado: octubre 2026 (migración `e3a9c7d1f5b2`, outbox de eventos).
 > Alcance: backend `py-pilates`, y el front `pilates-ui` en lo que interactúa con la API.
 > Los diagramas están en [Mermaid](https://mermaid.js.org/), que GitHub y la mayoría de los IDEs renderizan.
 
@@ -115,7 +115,7 @@ Es un **monolito modular** con **arquitectura hexagonal** (puertos y adaptadores
 
 ```
 src/pilates/
-├── shared/          kernel: AggregateRoot, DomainEvent, errores, UnitOfWork, Clock, EventBus, AuditLog
+├── shared/          kernel: AggregateRoot, DomainEvent, errores, UnitOfWork, Clock, AuditLog, outbox de eventos
 ├── identity/        usuarios, login, JWT, recuperación de contraseña, bloqueo, alta por admin
 ├── scheduling/      grilla de clases, calendario de reservas, cierres del gimnasio
 ├── booking/         turnos, políticas de reserva/cancelación, lista de espera, asistencia
@@ -180,7 +180,7 @@ Puntos de acoplamiento entre contextos, todos deliberados:
 - El `EventRegistry` con todas las suscripciones (ver [§12](#12-eventos-de-dominio-y-tareas-asíncronas)).
 - Una instancia de cada caso de uso, que recibe una **fábrica** de `UnitOfWork` (`uow()`).
 
-Los parámetros opcionales permiten inyectar dobles en los tests: un reloj fijo, `ConsoleEmailSender` y `SyncEventBus`.
+Los parámetros opcionales permiten inyectar dobles en los tests: un reloj fijo y `ConsoleEmailSender`. Con `EVENT_BUS=sync` los eventos del outbox se procesan en el mismo proceso (`SyncOutboxNotifier`).
 
 FastAPI guarda el container en `app.state.container`. Los endpoints lo reciben con `ContainerDep` (`shared/http/deps.py`). El worker crea uno por proceso (`lru_cache`).
 
@@ -195,7 +195,7 @@ sequenceDiagram
     participant UC as Caso de uso
     participant U as UnitOfWork
     participant DB as PostgreSQL
-    participant EB as EventBus
+    participant OB as Outbox
 
     C->>R: POST /turnos {clase_id} + Bearer
     R->>D: JWT decode → GetCurrentUser (verifica que no esté bloqueado)
@@ -205,9 +205,9 @@ sequenceDiagram
     U->>DB: BEGIN (sesión nueva)
     UC->>DB: SELECT … FOR UPDATE / INSERT/UPDATE vía repositorios
     UC->>U: uow.commit()
-    U->>DB: COMMIT
-    U->>EB: publish(eventos de agregados trackeados + extra)
-    EB-->>U: (Celery: encola una tarea por handler)
+    U->>DB: INSERT outbox (una fila por evento × handler)
+    U->>DB: COMMIT (cambios + eventos, atómico)
+    U->>OB: notify(ids) — Celery: send_task por fila; si falla, sólo se loguea
     UC-->>R: DTO
     R-->>C: 201 JSON
     Note over U: __exit__ hace rollback (no-op si ya hubo commit) y cierra la sesión
@@ -240,7 +240,6 @@ Los errores de dominio (`DomainError`) se propagan sin capturar hasta el handler
 
 ```python
 class Clock(ABC):      def now(self) -> datetime          # con tz del estudio
-class EventBus(ABC):   def publish(self, events) -> None
 class AuditLog(ABC):   def record(self, admin_id, action, details) -> None
 ```
 
@@ -260,11 +259,11 @@ Mecánica:
 1. `__enter__` abre una sesión SQLAlchemy nueva e instancia los repositorios sobre esa sesión.
 2. Cada repositorio, al hacer `add` o `save`, llama a `uow.track(aggregate)`.
 3. `add_event(e)` agrega eventos que no pertenecen a un agregado. Por ejemplo, `TurnosHabilitados` o `ClasesReabiertas`.
-4. `commit()` hace `session.commit()`. **Si el commit es exitoso**, junta los eventos de todos los agregados trackeados más los extra y llama a `event_bus.publish(events)`.
+4. `commit()` junta los eventos de todos los agregados trackeados más los extra y llama a `_commit(events)`. La implementación SQL los agrega a la tabla `outbox` (una fila por par evento-handler) **en la misma sesión**, hace `session.commit()` y recién entonces avisa al despachador (ver [§12.3](#123-outbox-transaccional)).
 5. Un `IntegrityError` en el commit se convierte en `ConflictError("integrity_conflict")`. Es la última línea de defensa ante carreras (ver [§11](#11-concurrencia-y-consistencia)).
 6. `__exit__` hace rollback y cierra la sesión.
 
-> Los eventos se publican **después** del commit y **sin outbox**: si el broker falla en ese instante, el evento se pierde (ver [§21](#21-limitaciones-conocidas-y-mejoras-posibles)).
+> Los cambios y sus eventos se guardan en la misma transacción: o se confirman los dos, o ninguno. Si después del commit Redis no responde, el request igual termina bien; el relay reenvía el evento.
 
 ### 4.4 Infraestructura
 
@@ -273,8 +272,9 @@ Mecánica:
 - **`SqlAuditLog`.** Inserta en `admin_audit_log` dentro de la transacción del caso de uso.
 - **`event_bus.py`.**
   - `EventRegistry`: `subscribe(EventType, handler_name, handler)`. Serializa y deserializa eventos con `pydantic.TypeAdapter`, que maneja dataclasses, UUID y fechas.
-  - `SyncEventBus`: ejecuta los handlers en el mismo proceso. Loguea las excepciones y no las propaga. Se usa en dev y tests.
-  - `CeleryEventBus`: por cada par (evento, handler) hace `send_task("pilates.dispatch_event", [event_name, handler_name, payload])`.
+- **`outbox.py`.** `Outbox` (escribe las filas y avisa), `OutboxDispatcher` (ejecuta un handler por fila), `OutboxRelay` (reenvía pendientes) y dos notificadores:
+  - `SyncOutboxNotifier`: despacha en el mismo proceso. Loguea las excepciones y no las propaga; la fila queda pendiente. Se usa en dev y tests.
+  - `CeleryOutboxNotifier`: por cada fila hace `send_task("pilates.dispatch_outbox", [id])`.
 
 ### 4.5 HTTP
 
@@ -731,8 +731,8 @@ sequenceDiagram
         UC->>DB: INSERT turnos
     end
     UC->>DB: DELETE lista_espera (si estaba)
-    UC->>DB: COMMIT
-    UC->>Q: dispatch_event(TurnoReservado, notifications.confirmacion)
+    UC->>DB: INSERT outbox + COMMIT
+    UC->>Q: dispatch_outbox(fila TurnoReservado → notifications.confirmacion)
     API-->>A: 201 TurnoDTO
     Q->>N: on_turno_reservado
     N-->>A: email "Reserva confirmada"
@@ -790,7 +790,7 @@ Resultado del log de Celery el 19/10/2026 a las 20:00:
 Task pilates.open_next_day[…] succeeded in 0.43s: {'fecha': '2026-10-21', 'estado': 'generada', 'creadas': 0}
 ```
 
-Luego se ejecutaron dos `dispatch_event`: `DiaSinClases(20)` y `TurnosHabilitados(21)`. Mailpit recibió 4 + 4 correos, uno de cada tipo por alumno activo.
+Luego se ejecutaron dos despachos de eventos (`dispatch_event`, el formato previo al outbox): `DiaSinClases(20)` y `TurnosHabilitados(21)`. Mailpit recibió 4 + 4 correos, uno de cada tipo por alumno activo.
 
 ### 10.4 Carga y eliminación de cierres
 
@@ -935,14 +935,68 @@ Configuración (`worker/celery_app.py`):
 - **Confiabilidad.** `task_acks_late=True` y `task_reject_on_worker_lost=True`: si el worker muere a mitad de una tarea, la tarea se reencola.
 - **Reparto.** `worker_prefetch_multiplier=1`.
 - **Resultados.** `backend=None`: no se guardan los resultados de las tareas.
+- **Publicación.** `task_publish_retry_policy` con 2 reintentos cortos: si Redis no responde, el request no se traba más de ~1 s. El evento ya está en el outbox.
 
 | Tarea | Disparador | Reintentos | Qué hace |
 |---|---|---|---|
-| `pilates.dispatch_event(event_name, handler_name, payload)` | `CeleryEventBus` | `autoretry_for=Exception`, backoff exponencial, máx. 5 | Deserializa el evento y ejecuta **un** handler |
+| `pilates.dispatch_outbox(message_id)` | `CeleryOutboxNotifier` (tras el commit, o el relay) | `autoretry_for=Exception`, backoff exponencial, máx. 5 | Procesa **una** fila del outbox: un evento para un handler |
+| `pilates.relay_outbox` | beat `outbox-relay`: cada minuto | — | Reenvía las filas pendientes cuyo aviso se perdió y purga las procesadas |
+| `pilates.dispatch_event(event_name, handler_name, payload)` | — (formato anterior) | igual que `dispatch_outbox` | Sólo para mensajes encolados antes del deploy del outbox |
 | `pilates.open_next_day` | beat `apertura-turnos`: `crontab(hour=HH, minute=MM, day_of_week="mon-fri")` | máx. 3 | `GenerateDailyClasses.execute(notify=True)` |
 | `pilates.send_reminders` | beat `recordatorios`: cada 10 min | — | `SendClassReminders.execute()` |
 
-Hay **una tarea por par (evento, handler)**. Así, si falla un handler (por ejemplo, el SMTP del aviso a la lista de espera), al reintentarlo no se reenvía la confirmación ni se repiten otros efectos.
+Hay **una fila (y una tarea) por par (evento, handler)**. Así, si falla un handler (por ejemplo, el SMTP del aviso a la lista de espera), al reintentarlo no se reenvía la confirmación ni se repiten otros efectos.
+
+### 12.3 Outbox transaccional
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant UC as Caso de uso
+    participant DB as PostgreSQL
+    participant R as Redis
+    participant W as Worker (dispatch_outbox)
+    participant RL as Beat (relay_outbox, cada minuto)
+
+    UC->>DB: cambios + INSERT outbox, COMMIT
+    UC->>R: send_task(dispatch_outbox, id)
+    alt Redis responde
+        R->>W: dispatch_outbox(id)
+    else Redis caído / mensaje perdido
+        Note over UC: se loguea un warning, el request responde OK
+        RL->>DB: filas pendientes con más de 2 min (sin reenviar en los últimos 5)
+        RL->>R: send_task(dispatch_outbox, id) y marca last_relayed_at
+        R->>W: dispatch_outbox(id)
+    end
+    W->>DB: SELECT … WHERE processed_at IS NULL FOR UPDATE SKIP LOCKED
+    alt ya procesada o tomada por otro
+        W-->>W: no hace nada (idempotente)
+    else pendiente
+        W->>W: ejecuta el handler
+        alt OK
+            W->>DB: processed_at = now, COMMIT
+        else falla
+            W->>DB: attempts + 1, last_error; Celery reintenta con backoff
+        end
+    end
+```
+
+| Constante (`outbox.py`) | Valor | Para qué |
+|---|---|---|
+| `RELAY_GRACE` | 2 min | No reenviar lo que el aviso inmediato todavía está procesando |
+| `RELAY_REQUEUE_AFTER` | 5 min | No reenviar mientras Celery sigue con sus reintentos |
+| `MAX_ATTEMPTS` | 10 | Después, la fila queda pendiente para revisión manual y el relay loguea un error |
+| `RELAY_BATCH` | 500 | Filas por pasada |
+| `RETENTION` | 7 días | Se borran las filas procesadas más viejas |
+
+Garantía: **al menos una vez**. Un handler se puede repetir si el proceso muere entre que termina y se marca `processed_at`; los handlers actuales sólo mandan emails, así que el peor caso es un mail duplicado.
+
+Para ver qué quedó trabado:
+
+```sql
+SELECT event_name, handler_name, attempts, last_error, created_at
+FROM outbox WHERE processed_at IS NULL ORDER BY created_at;
+```
 
 ---
 
@@ -1017,6 +1071,17 @@ erDiagram
         timestamptz created_at
         timestamptz used_at
     }
+    outbox {
+        uuid id PK
+        varchar event_name
+        varchar handler_name
+        json payload
+        timestamptz created_at "idx parcial: pendientes"
+        timestamptz processed_at
+        int attempts
+        text last_error
+        timestamptz last_relayed_at
+    }
     admin_audit_log {
         uuid id PK
         uuid admin_id FK "idx"
@@ -1036,6 +1101,7 @@ erDiagram
 | `ix_turnos_user_id` | Mis turnos, límites diarios, bloqueo |
 | `uq_lista_espera_user_clase` | Una entrada por alumno y clase |
 | `cierres_gimnasio.fecha UNIQUE` | Un cierre por día |
+| `ix_outbox_pending (created_at) WHERE processed_at IS NULL` | Índice parcial para el relay: sólo indexa las filas pendientes |
 | `password_reset_tokens.token_hash UNIQUE` | Búsqueda por hash |
 | Enums como `VARCHAR(32)` + `CHECK` | `native_enum=False, create_constraint=True`: agregar un valor requiere una migración del CHECK, no un `ALTER TYPE` |
 
@@ -1052,6 +1118,7 @@ erDiagram
 | `04edcad12a0b` | `20261015_04edcad12a0b_initial_schema.py` | Esquema inicial (7 tablas) |
 | `7c1e4b9a2d3f` | `20261019_7c1e4b9a2d3f_turnos_booked_by.py` | `turnos.booked_by` (`alumno` por defecto) |
 | `b5d2f8e1c4a7` | `20261019_b5d2f8e1c4a7_turnos_cancelled_with_class.py` | `turnos.cancelled_with_class`. Backfill: `true` para los `cancelada_por_admin` cuyo motivo no es "Cuenta suspendida" |
+| `e3a9c7d1f5b2` | `20261020_e3a9c7d1f5b2_outbox.py` | Tabla `outbox` + índice parcial `ix_outbox_pending (created_at) WHERE processed_at IS NULL` |
 
 La API ejecuta `alembic upgrade head` cada vez que arranca. Para crear una revisión nueva:
 
@@ -1289,7 +1356,7 @@ La regla general es que el front **no duplica reglas de negocio**: decide qué b
 
 ```bash
 docker compose up -d db          # los tests crean y usan la base pilates_test
-.venv/bin/pytest                 # 53 tests
+.venv/bin/pytest                 # 56 tests
 ```
 
 | Carpeta | Tipo | Qué cubre |
@@ -1298,12 +1365,13 @@ docker compose up -d db          # los tests crean y usan la base pilates_test
 | `tests/unit/test_booking_domain.py` | Unitario | Política (cupo, ventana, límites), estados del turno, rebook, reglas de reactivación, reserva y cancelación admin, `cancelled_with_class` |
 | `tests/unit/test_identity_domain.py` | Unitario | Email, bloqueo, admin no bloqueable, token de un solo uso |
 | `tests/application/test_api_flows.py` | Integración (TestClient + Postgres real) | Flujos end-to-end por HTTP: registro y login, apertura, cupo y lista de espera, límites, ventana de cancelación, cierres, job nocturno (incluido "mañana cerrado → abre el siguiente"), asistencia, recordatorios, bloqueo, reset, calendario, reactivación, rangos de vacaciones, alta por admin, reserva y cancelación admin, cupo con asistencia marcada |
+| `tests/application/test_outbox.py` | Integración | El evento sobrevive a Redis caído y el relay lo entrega; un handler fallido queda pendiente y se reintenta; el despacho es idempotente; las filas que agotaron reintentos no se reenvían |
 | `tests/application/test_concurrency.py` | Integración con hilos | Nunca se supera el cupo (alumnos, y alumnos + admin) |
 
 En `conftest.py`:
 
 - **Reloj.** Se usa un `FixedClock` controlable. La fecha base es el lunes 12/10/2026 a las 21:00.
-- **Infraestructura.** `SyncEventBus` y `ConsoleEmailSender`; los asserts sobre emails leen `outbox`.
+- **Infraestructura.** `EVENT_BUS=sync` (los eventos pasan por la tabla `outbox` y se despachan en el mismo proceso) y `ConsoleEmailSender`; los asserts sobre emails leen su lista `outbox`.
 - **Base.** Se limpia entre tests.
 
 ### 19.2 Prueba de carga (Locust)
@@ -1350,6 +1418,7 @@ docker compose up -d --build                                  # levantar / actua
 docker compose logs -f api worker beat                        # logs
 docker compose exec api python -m pilates.cli open-next-day   # forzar la apertura (genera + notifica)
 docker compose exec api python -m pilates.cli send-reminders
+docker compose exec api python -m pilates.cli relay-outbox    # reenviar eventos pendientes del outbox
 docker compose exec api python -m pilates.cli create-admin
 docker compose exec db psql -U pilates -d pilates             # consola SQL
 ```
@@ -1363,7 +1432,7 @@ EVENT_BUS=sync EMAIL_BACKEND=console uvicorn --factory pilates.main:create_app -
 
 ### 20.2 Cómo verificar el job nocturno
 
-1. Buscar en `docker compose logs worker` las líneas `pilates.open_next_day[…] succeeded … {'fecha': …, 'estado': 'generada', …}` y los `dispatch_event` posteriores.
+1. Buscar en `docker compose logs worker` las líneas `pilates.open_next_day[…] succeeded … {'fecha': …, 'estado': 'generada', …}` y los `dispatch_outbox` posteriores.
    - Los logs de los contenedores están en **UTC**: las 20:00 de Argentina aparecen como 23:00.
 2. `GET /clases/disponibles` con un alumno: la fecha objetivo tiene que estar en `abierta`.
 3. En Mailpit (http://localhost:8025, o `GET /api/v1/messages`) tienen que aparecer "Ya podés reservar tus turnos del …" y, si correspondía, "Sin clases el …".
@@ -1374,7 +1443,7 @@ EVENT_BUS=sync EMAIL_BACKEND=console uvicorn --factory pilates.main:create_app -
 |---|---|
 | Hoy no tiene clases al levantar por primera vez | La grilla la genera el job del día hábil anterior. Generala desde Admin → Clases o con `POST /admin/clases/generar {"fecha": "AAAA-MM-DD"}` |
 | El front no conecta desde el teléfono | Agregar `http://<IP>:3000` a `CORS_ORIGINS` y usar `FRONTEND_URL=http://<IP>:3000`; recrear el contenedor `api` |
-| Los emails no llegan | Revisar que `worker` esté arriba y sus logs (los reintentos de `dispatch_event` usan backoff) |
+| Los emails no llegan | Revisar que `worker` esté arriba y sus logs (los reintentos de `dispatch_outbox` usan backoff). Consultar las filas pendientes de `outbox` y su `last_error` (ver [§12.3](#123-outbox-transaccional)) |
 | "Mañana" aparece `pendiente_apertura` antes de las 20:00 | Es lo esperado: la apertura es a `BOOKING_OPENING_TIME` |
 | 422 en `/auth/register` con emails `.local` | `EmailStr` rechaza dominios reservados; usar un dominio real o `example.com` en pruebas |
 
@@ -1384,21 +1453,19 @@ EVENT_BUS=sync EMAIL_BACKEND=console uvicorn --factory pilates.main:create_app -
 
 Ordenadas por impacto estimado.
 
-1. **Eventos sin outbox.** Se publican en Redis después del commit. Si Redis no está disponible en ese momento, el commit queda hecho pero los emails (y la cancelación de turnos de un usuario bloqueado) se pierden. *Mejora:* una tabla `outbox` escrita en la misma transacción y un *relay* que la publique.
-2. **Reintentos de handlers masivos.**
-   - `on_turnos_habilitados`, `on_dia_sin_clases` y el aviso a la lista de espera mandan N emails dentro de una sola tarea. Si el SMTP falla a mitad, el reintento reenvía a quienes ya lo habían recibido.
+1. **Reintentos de handlers masivos.**
+   - `on_turnos_habilitados`, `on_dia_sin_clases` y el aviso a la lista de espera mandan N emails dentro de una sola fila del outbox. Si el SMTP falla a mitad, el reintento reenvía a quienes ya lo habían recibido.
    - *Mejora:* una tarea por destinatario, o registrar el envío para que sea idempotente.
-3. **Throughput de autenticación.** bcrypt corre en un único proceso uvicorn. *Mejoras:*
+2. **Throughput de autenticación.** bcrypt corre en un único proceso uvicorn. *Mejoras:*
    - `uvicorn --workers N` (o gunicorn con workers uvicorn).
    - Ajustar el pool de SQLAlchemy a `workers × hilos`.
    - Rate limiting en `/auth/login`, `/auth/register` y `/auth/forgot-password`.
-4. **Recordatorios y apertura nocturna.**
+3. **Recordatorios y apertura nocturna.**
    - Con `REMINDER_HOURS_BEFORE=12` y apertura a las 20:00, una reserva hecha a la noche para una clase de las 08:00 ya entra en la ventana. El recordatorio llega en la siguiente pasada (≤ 10 min).
    - *Mejora:* no recordar reservas hechas hace menos de X horas, o recordar la mañana de la clase.
-5. **Lista de espera sin prioridad.** Se avisa a todos y gana el más rápido. Es lo que se decidió, pero no hay reserva temporal para el primero de la lista.
-6. **JWT sin revocación ni refresh.** El logout sólo borra el token del cliente. La consulta del usuario en cada request mitiga el caso de bloqueo, a costa de una query por request.
-7. **Horizonte de cierres de 90 días.** `closed_dates_from` y `next_open_weekday` miran 90 días hacia adelante. Un cierre continuo más largo no se saltea del todo (caso borde).
-8. **Duplicación menor.** `scheduling.application.services.next_open_day` (consulta por día) y `calendar.next_open_weekday` (sobre un conjunto en memoria) resuelven lo mismo. Se podrían unificar.
-9. **Pool y sesiones.** Engine síncrono con el pool por defecto (5 + 10). Con varios workers de uvicorn hay que dimensionarlo junto con `max_connections` de Postgres.
-10. **Sin observabilidad estructurada.** Hay logs de texto, sin métricas ni tracing. Los resultados de Celery no se guardan (`backend=None`). *Mejora:* logs JSON, Flower o métricas de Celery, y un healthcheck que incluya la base y Redis.
-11. **README desactualizado.** La tabla de endpoints del `README.md` no incluye `POST /admin/usuarios`, `POST /admin/turnos` ni `POST /admin/turnos/{id}/cancelar`. Este documento es la referencia completa.
+4. **Lista de espera sin prioridad.** Se avisa a todos y gana el más rápido. Es lo que se decidió, pero no hay reserva temporal para el primero de la lista.
+5. **JWT sin revocación ni refresh.** El logout sólo borra el token del cliente. La consulta del usuario en cada request mitiga el caso de bloqueo, a costa de una query por request.
+6. **Horizonte de cierres de 90 días.** `closed_dates_from` y `next_open_weekday` miran 90 días hacia adelante. Un cierre continuo más largo no se saltea del todo (caso borde).
+7. **Duplicación menor.** `scheduling.application.services.next_open_day` (consulta por día) y `calendar.next_open_weekday` (sobre un conjunto en memoria) resuelven lo mismo. Se podrían unificar.
+8. **Pool y sesiones.** Engine síncrono con el pool por defecto (5 + 10). Con varios workers de uvicorn hay que dimensionarlo junto con `max_connections` de Postgres.
+9. **Sin observabilidad estructurada.** Hay logs de texto, sin métricas ni tracing. Los resultados de Celery no se guardan (`backend=None`). *Mejora:* logs JSON, Flower o métricas de Celery, y un healthcheck que incluya la base y Redis.

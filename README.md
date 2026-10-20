@@ -25,6 +25,7 @@ Comandos útiles:
 ```bash
 docker compose exec api python -m pilates.cli open-next-day    # dispara la apertura manualmente
 docker compose exec api python -m pilates.cli send-reminders
+docker compose exec api python -m pilates.cli relay-outbox     # reenvía eventos pendientes del outbox
 ```
 
 > **Primer arranque:** la grilla de cada día la genera la apertura nocturna del día hábil anterior. Si levantás el stack durante el día, las clases de hoy no existen todavía. Generalas desde el front (Admin → Clases → "Generar grilla") o con `POST /admin/clases/generar {"fecha": "AAAA-MM-DD"}`.
@@ -65,7 +66,7 @@ uvicorn --factory pilates.main:create_app --reload
 
 ```
 src/pilates/
-├── shared/            Kernel compartido: AggregateRoot, DomainEvent, errores, UnitOfWork, Clock, EventBus
+├── shared/            Kernel compartido: AggregateRoot, DomainEvent, errores, UnitOfWork, Clock, outbox de eventos
 │   ├── domain/ application/      (puertos)
 │   ├── infrastructure/           (SQLAlchemy UoW, bus de eventos sync/Celery, reloj, auditoría)
 │   └── http/                     (dependencias de auth y mapeo de errores de dominio a HTTP)
@@ -73,7 +74,7 @@ src/pilates/
 ├── scheduling/        Grilla de clases, calendario de reservas, cierres del gimnasio
 ├── booking/           Turnos, reglas de reserva y cancelación, lista de espera, asistencia
 ├── notifications/     Handlers de eventos → correos, recordatorios
-├── worker/            Celery app + tareas (dispatch_event, open_next_day, send_reminders)
+├── worker/            Celery app + tareas (dispatch_outbox, relay_outbox, open_next_day, send_reminders)
 ├── bootstrap.py       Raíz de composición (conecta puertos con adaptadores)
 └── main.py            Factory de FastAPI
 ```
@@ -81,7 +82,7 @@ src/pilates/
 Cada contexto se divide en `domain/` (modelo puro, sin frameworks), `application/` (casos de uso y puertos) y `adapters/` (ORM, repositorios, HTTP, seguridad).
 
 - **Aislamiento del dominio:** las entidades son dataclasses puras. Los modelos ORM viven en `adapters/orm.py` y los repositorios traducen entre ambos.
-- **Eventos de dominio:** los agregados registran eventos (`TurnoReservado`, `TurnoCancelado`, `UserBlocked`, …). La UnitOfWork los publica *después* del commit. Con Celery se encola una tarea por par (evento, handler), así un reintento no duplica los otros correos.
+- **Eventos de dominio:** los agregados registran eventos (`TurnoReservado`, `TurnoCancelado`, `UserBlocked`, …). La UnitOfWork los guarda en la tabla `outbox` **en la misma transacción** que los cambios (una fila por par evento-handler) y después del commit los encola en Celery. Si Redis no responde, el relay (`relay_outbox`, cada minuto) los reenvía; el despacho es idempotente, así un reintento no duplica los otros correos.
 - **Consistencia inmediata vs. eventual:**
   - Lo que protege invariantes ocurre en la misma transacción: al cancelar una clase o cargar un cierre se cancelan los turnos.
   - Los efectos secundarios van por eventos: los correos, y la liberación de turnos futuros al bloquear un usuario.

@@ -17,16 +17,18 @@ from pilates.identity.adapters.persistence import (
     SqlUserRepository,
 )
 from pilates.scheduling.adapters.persistence import SqlCierreRepository, SqlClaseRepository, SqlScheduleQueries
-from pilates.shared.application.ports import EventBus
 from pilates.shared.application.unit_of_work import UnitOfWork
 from pilates.shared.domain.errors import ConflictError
+from pilates.shared.domain.events import DomainEvent
 from pilates.shared.infrastructure.audit import SqlAuditLog
+from pilates.shared.infrastructure.outbox import Outbox
 
 
 class SqlAlchemyUnitOfWork(UnitOfWork):
-    def __init__(self, session_factory: sessionmaker, event_bus: EventBus, tz: ZoneInfo) -> None:
-        super().__init__(event_bus)
+    def __init__(self, session_factory: sessionmaker, outbox: Outbox, tz: ZoneInfo) -> None:
+        super().__init__()
         self._session_factory = session_factory
+        self._outbox = outbox
         self._tz = tz
         self.session: Session | None = None
 
@@ -52,13 +54,15 @@ class SqlAlchemyUnitOfWork(UnitOfWork):
             self.session.close()
             self.session = None
 
-    def _commit(self) -> None:
+    def _commit(self, events: list[DomainEvent]) -> None:
+        message_ids = self._outbox.stage(self.session, events)
         try:
             self.session.commit()
         except IntegrityError as e:
             # Última línea de defensa ante carreras (restricciones únicas de la base).
             self.session.rollback()
             raise ConflictError("La operación entra en conflicto con datos existentes", code="integrity_conflict") from e
+        self._outbox.notify(message_ids)
 
     def rollback(self) -> None:
         if self.session is not None:

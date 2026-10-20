@@ -32,10 +32,18 @@ from pilates.notifications.application.ports import EmailSender
 from pilates.scheduling.application import services as scheduling
 from pilates.scheduling.domain.calendar import BookingCalendar, GridTemplate
 from pilates.scheduling.domain.events import ClasesReabiertas, DiaSinClases, TurnosHabilitados
-from pilates.shared.application.ports import Clock, EventBus
+from pilates.shared.application.ports import Clock
 from pilates.shared.infrastructure.clock import SystemClock
 from pilates.shared.infrastructure.db import make_engine, make_session_factory
-from pilates.shared.infrastructure.event_bus import CeleryEventBus, EventRegistry, SyncEventBus
+from pilates.shared.infrastructure.event_bus import EventRegistry
+from pilates.shared.infrastructure.outbox import (
+    CeleryOutboxNotifier,
+    Outbox,
+    OutboxDispatcher,
+    OutboxNotifier,
+    OutboxRelay,
+    SyncOutboxNotifier,
+)
 from pilates.shared.infrastructure.unit_of_work import SqlAlchemyUnitOfWork
 
 
@@ -45,6 +53,9 @@ class Container:
     engine: Engine
     clock: Clock
     registry: EventRegistry
+    outbox: Outbox
+    outbox_dispatcher: OutboxDispatcher
+    relay_outbox: OutboxRelay
     email_sender: EmailSender
     token_service: JwtTokenService
     # identity
@@ -93,12 +104,12 @@ def _email_sender(settings: Settings) -> EmailSender:
     )
 
 
-def _default_event_bus(settings: Settings, registry: EventRegistry) -> EventBus:
+def _outbox_notifier(settings: Settings, dispatcher: OutboxDispatcher) -> OutboxNotifier:
     if settings.event_bus == "sync":
-        return SyncEventBus(registry)
+        return SyncOutboxNotifier(dispatcher)
     from pilates.worker.celery_app import celery_app
 
-    return CeleryEventBus(registry, celery_app.send_task)
+    return CeleryOutboxNotifier(celery_app.send_task)
 
 
 def build_container(
@@ -107,7 +118,6 @@ def build_container(
     engine: Engine | None = None,
     clock: Clock | None = None,
     email_sender: EmailSender | None = None,
-    event_bus: EventBus | None = None,
 ) -> Container:
     logging.basicConfig(level=settings.log_level)
     tz = ZoneInfo(settings.timezone)
@@ -116,10 +126,11 @@ def build_container(
     clock = clock or SystemClock(settings.timezone)
     email_sender = email_sender or _email_sender(settings)
     registry = EventRegistry()
-    bus = event_bus or _default_event_bus(settings, registry)
+    dispatcher = OutboxDispatcher(session_factory, registry)
+    outbox = Outbox(registry, _outbox_notifier(settings, dispatcher))
 
     def uow() -> SqlAlchemyUnitOfWork:
-        return SqlAlchemyUnitOfWork(session_factory, bus, tz)
+        return SqlAlchemyUnitOfWork(session_factory, outbox, tz)
 
     hasher = BcryptPasswordHasher()
     tokens = JwtTokenService(settings.jwt_secret, settings.jwt_algorithm, timedelta(minutes=settings.jwt_expires_minutes))
@@ -155,6 +166,9 @@ def build_container(
         engine=engine,
         clock=clock,
         registry=registry,
+        outbox=outbox,
+        outbox_dispatcher=dispatcher,
+        relay_outbox=OutboxRelay(session_factory, outbox),
         email_sender=email_sender,
         token_service=tokens,
         register_user=identity.RegisterUser(uow, hasher, clock),

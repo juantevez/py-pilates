@@ -3,7 +3,6 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
-from pilates.shared.application.ports import EventBus
 from pilates.shared.domain.aggregate import AggregateRoot
 from pilates.shared.domain.events import DomainEvent
 
@@ -20,8 +19,8 @@ if TYPE_CHECKING:
 class UnitOfWork(ABC):
     """Límite transaccional compartido por los bounded contexts del monolito modular.
 
-    Los repositorios registran los agregados que tocan (``track``); tras un commit
-    exitoso se recolectan sus eventos de dominio y se publican en el EventBus.
+    Los repositorios registran los agregados que tocan (``track``); al hacer commit se
+    recolectan sus eventos de dominio y se persisten junto con los cambios (outbox).
     """
 
     users: UserRepository
@@ -36,8 +35,7 @@ class UnitOfWork(ABC):
     booking_queries: BookingQueries
     audit: AuditLog
 
-    def __init__(self, event_bus: EventBus) -> None:
-        self._event_bus = event_bus
+    def __init__(self) -> None:
         self._seen: list[AggregateRoot] = []
         self._extra_events: list[DomainEvent] = []
 
@@ -46,7 +44,7 @@ class UnitOfWork(ABC):
             self._seen.append(aggregate)
 
     def add_event(self, event: DomainEvent) -> None:
-        """Evento de aplicación que no pertenece a un agregado puntual (se publica tras el commit)."""
+        """Evento de aplicación que no pertenece a un agregado puntual (se persiste en el commit)."""
         self._extra_events.append(event)
 
     def __enter__(self) -> UnitOfWork:
@@ -58,14 +56,13 @@ class UnitOfWork(ABC):
         self.rollback()
 
     def commit(self) -> None:
-        self._commit()
         events = [e for agg in self._seen for e in agg.pull_events()] + self._extra_events
         self._seen, self._extra_events = [], []
-        if events:
-            self._event_bus.publish(events)
+        self._commit(events)
 
     @abstractmethod
-    def _commit(self) -> None: ...
+    def _commit(self, events: list[DomainEvent]) -> None:
+        """Persiste los cambios y los eventos en una única transacción."""
 
     @abstractmethod
     def rollback(self) -> None: ...
