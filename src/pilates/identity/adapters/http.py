@@ -79,7 +79,12 @@ def login(body: LoginRequest, request: Request, c: ContainerDep):
 
 
 @router.post("/forgot-password", status_code=status.HTTP_202_ACCEPTED)
-def forgot_password(body: ForgotPasswordRequest, c: ContainerDep) -> dict:
+def forgot_password(body: ForgotPasswordRequest, request: Request, c: ContainerDep) -> dict:
+    """Límites por IP y por email. El contador por email cuenta exista o no la cuenta,
+    así un 429 no revela qué emails están registrados."""
+    s, limiter = c.settings, c.rate_limiter
+    limiter.hit(f"forgot:ip:{_client_ip(request)}", s.password_resets_per_ip_per_hour, 3600)
+    limiter.hit(f"forgot:email:{_email_key(body.email)}", s.password_resets_per_email_per_hour, 3600)
     c.request_password_reset.execute(email=body.email)
     return {"detail": "Si el email está registrado, vas a recibir un enlace para restablecer la contraseña."}
 

@@ -18,7 +18,8 @@ def limited(container, engine, clock, outbox):
     settings = Settings(
         database_url=TEST_DB_URL, event_bus="sync", email_backend="console", jwt_secret="x" * 32,
         rate_limit_storage="memory", login_attempts_per_ip_per_minute=6, login_failures_per_email=3,
-        registrations_per_ip_per_hour=2, _env_file=None,
+        registrations_per_ip_per_hour=2, password_resets_per_ip_per_hour=6, password_resets_per_email_per_hour=2,
+        _env_file=None,
     )
     c = build_container(settings, engine=engine, clock=clock, email_sender=outbox)
     c.register_user.execute(email="ana@test.com", full_name="Ana", password="secreta123", role=Role.ALUMNO)
@@ -61,6 +62,26 @@ def test_login_attempts_are_limited_per_ip(limited):
     for _ in range(6):
         assert login(limited, email="beto@test.com").status_code == 200
     assert login(limited, email="beto@test.com").status_code == 429
+
+
+def forgot(client, email):
+    return client.post("/auth/forgot-password", json={"email": email})
+
+
+def test_password_reset_is_limited_per_email_without_revealing_accounts(limited, outbox):
+    outbox.outbox.clear()
+    for _ in range(2):
+        assert forgot(limited, "ana@test.com").status_code == 202
+    blocked = forgot(limited, "ana@test.com")
+    assert blocked.status_code == 429 and int(blocked.headers["Retry-After"]) > 3500
+    assert len([m for m in outbox.outbox if m.to == "ana@test.com"]) == 2  # el tercero no salió
+
+    # Un email inexistente se limita igual: el 429 no distingue cuentas registradas.
+    assert [forgot(limited, "nadie@test.com").status_code for _ in range(3)] == [202, 202, 429]
+
+
+def test_password_reset_is_limited_per_ip(limited):
+    assert [forgot(limited, f"x{i}@test.com").status_code for i in range(7)] == [202] * 6 + [429]
 
 
 def test_window_expires():

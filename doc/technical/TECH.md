@@ -1165,7 +1165,7 @@ El nombre de archivo sigue `file_template = YYYYMMDD_<rev>_<slug>`.
 |---|---|---|---|---|
 | POST | `/auth/register` | — | `{email, full_name, password(8–128)}` | 201 `UserDTO` · 409 `email_taken` · 422 · 429 |
 | POST | `/auth/login` | — | `{email, password}` | 200 `{access_token, token_type, user}` · 401 · 403 `user_blocked` · 429 |
-| POST | `/auth/forgot-password` | — | `{email}` | 202 siempre (mensaje genérico) |
+| POST | `/auth/forgot-password` | — | `{email}` | 202 siempre (mensaje genérico) · 429 |
 | POST | `/auth/reset-password` | — | `{token, new_password}` | 204 · 422 `invalid_reset_token` / `weak_password` |
 | GET | `/auth/me` | usuario | — | `UserDTO` |
 
@@ -1281,7 +1281,7 @@ Formato de respuesta: `{"error": "<code>", "detail": "<mensaje para mostrar>"}`.
 | 422 | `not_a_weekday` / `date_in_past` / `invalid_range` | Fechas inválidas |
 | 422 | `cannot_block_admin` | Bloquear a un admin |
 | 422 | `invalid_email` / `invalid_name` / `weak_password` / `invalid_reset_token` | Identidad |
-| 429 | `too_many_requests` | Rate limiting de login o registro. Header `Retry-After` en segundos; `detail` dice cuánto esperar (ver [§17.1](#171-rate-limiting)) |
+| 429 | `too_many_requests` | Rate limiting de login, registro o recuperación de contraseña. Header `Retry-After` en segundos; `detail` dice cuánto esperar (ver [§17.1](#171-rate-limiting)) |
 
 ---
 
@@ -1326,6 +1326,7 @@ Todas las variables se leen de `.env` o del entorno con `pydantic-settings` (`co
 | `LOGIN_ATTEMPTS_PER_IP_PER_MINUTE` | `20` | Intentos de login por IP por minuto |
 | `LOGIN_FAILURES_PER_EMAIL` / `LOGIN_FAILURE_WINDOW_MINUTES` | `5` / `15` | Logins fallidos por email antes de bloquear esa cuenta durante la ventana |
 | `REGISTRATIONS_PER_IP_PER_HOUR` | `10` | Registros públicos por IP por hora |
+| `PASSWORD_RESETS_PER_IP_PER_HOUR` / `PASSWORD_RESETS_PER_EMAIL_PER_HOUR` | `5` / `3` | Pedidos de recuperación de contraseña |
 | `WORKER_CONCURRENCY` | `2` | Sólo entrypoint del worker |
 | `WEB_CONCURRENCY` | `4` en el compose (`1` si se corre el entrypoint sin compose) | Procesos de uvicorn de la API (ver [§19.3](#193-workers-de-uvicorn)) |
 
@@ -1357,6 +1358,8 @@ Ventana fija con contadores en **Redis**, compartidos entre los 4 workers de uvi
 | `POST /auth/login` | `login:ip:<ip>` | 20 por minuto | Todos los intentos |
 | `POST /auth/login` | `login:fail:<sha256(email)>` | 5 en 15 minutos | Sólo los fallidos (401). Un login correcto lo resetea. Al llegar al límite, esa cuenta queda bloqueada aunque la contraseña sea correcta, y las demás cuentas siguen funcionando |
 | `POST /auth/register` | `register:ip:<ip>` | 10 por hora | Todos los intentos |
+| `POST /auth/forgot-password` | `forgot:ip:<ip>` | 5 por hora | Todos los pedidos |
+| `POST /auth/forgot-password` | `forgot:email:<sha256(email)>` | 3 por hora | Todos los pedidos para ese email, **exista o no la cuenta**: el 429 no revela qué emails están registrados. Evita que alguien llene de mails la casilla de un alumno |
 
 - **Fail open.** Si Redis no responde, se deja pasar la request y se deja de consultar Redis durante 30 s, así sólo una request por proceso paga el timeout (0,5 s, sin reintentos). Medido con Redis caído: el login tarda lo mismo que bcrypt (~0,53 s).
 - **IP del cliente.** Es `request.client.host`. Los clientes que corren en la misma máquina que Docker llegan con la IP del bridge (ej. `172.21.0.1`) y comparten el contador; los de la red local (teléfonos) conservan la suya. Detrás de un proxy hay que configurar `--forwarded-allow-ips` para que uvicorn tome `X-Forwarded-For`.
@@ -1401,7 +1404,7 @@ La regla general es que el front **no duplica reglas de negocio**: decide qué b
 
 ```bash
 docker compose up -d db          # los tests crean y usan la base pilates_test
-.venv/bin/pytest                 # 66 tests
+.venv/bin/pytest                 # 68 tests
 ```
 
 | Carpeta | Tipo | Qué cubre |
@@ -1410,7 +1413,7 @@ docker compose up -d db          # los tests crean y usan la base pilates_test
 | `tests/unit/test_booking_domain.py` | Unitario | Política (cupo, ventana, límites), estados del turno, rebook, reglas de reactivación, reserva y cancelación admin, `cancelled_with_class` |
 | `tests/unit/test_identity_domain.py` | Unitario | Email, bloqueo, admin no bloqueable, token de un solo uso |
 | `tests/application/test_api_flows.py` | Integración (TestClient + Postgres real) | Flujos end-to-end por HTTP: registro y login, apertura, cupo y lista de espera, límites, ventana de cancelación, cierres (incluido cerrar un día ya habilitado: aviso general y apertura del siguiente), job nocturno (incluido "mañana cerrado → abre el siguiente"), asistencia, recordatorios, bloqueo, reset, calendario, reactivación, rangos de vacaciones, alta por admin, reserva y cancelación admin, cupo con asistencia marcada |
-| `tests/application/test_rate_limit.py` | Integración + unitario | Límite de registro por IP, bloqueo por fallos de un email (sin afectar otras cuentas), reset al loguear bien, límite por IP, vencimiento de la ventana, fail open sin Redis y sin reintentos |
+| `tests/application/test_rate_limit.py` | Integración + unitario | Límite de registro por IP, recuperación de contraseña por email (sin revelar cuentas) y por IP, bloqueo por fallos de un email (sin afectar otras cuentas), reset al loguear bien, límite por IP, vencimiento de la ventana, fail open sin Redis y sin reintentos |
 | `tests/application/test_outbox.py` | Integración | El evento sobrevive a Redis caído y el relay lo entrega; un handler fallido queda pendiente y se reintenta; el despacho es idempotente; las filas que agotaron reintentos no se reenvían; en un envío masivo o en los recordatorios, un fallo de SMTP sólo reintenta al destinatario que falló |
 | `tests/application/test_concurrency.py` | Integración con hilos | Nunca se supera el cupo (alumnos, y alumnos + admin) |
 
@@ -1522,7 +1525,7 @@ Ordenadas por impacto estimado.
 
 1. **Latencia de login y registro en ráfagas.** bcrypt (costo 12, ~0,5 s por hash) satura la CPU con muchos logins simultáneos. La API ya corre con 4 workers, pero eso sólo mejora los demás endpoints (ver [§19.3](#193-workers-de-uvicorn)). *Mejoras posibles:*
    - Más CPU, o bajar el costo de bcrypt a 10 (~4 veces más rápido; decisión de seguridad).
-   - Login y registro ya tienen rate limiting (ver [§17.1](#171-rate-limiting)). Falta en `/auth/forgot-password`, que dispara emails.
+   - Login, registro y recuperación de contraseña ya tienen rate limiting (ver [§17.1](#171-rate-limiting)).
 2. **Recordatorios y apertura nocturna.**
    - Con `REMINDER_HOURS_BEFORE=12` y apertura a las 20:00, una reserva hecha a la noche para una clase de las 08:00 ya entra en la ventana. El recordatorio llega en la siguiente pasada (≤ 10 min).
    - *Mejora:* no recordar reservas hechas hace menos de X horas, o recordar la mañana de la clase.
