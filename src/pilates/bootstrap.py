@@ -122,7 +122,7 @@ def build_container(
 ) -> Container:
     logging.basicConfig(level=settings.log_level)
     tz = ZoneInfo(settings.timezone)
-    engine = engine or make_engine(settings.database_url)
+    engine = engine or make_engine(settings.database_url, settings.db_pool_size, settings.db_max_overflow)
     session_factory = make_session_factory(engine)
     clock = clock or SystemClock(settings.timezone)
     email_sender = email_sender or _email_sender(settings)
