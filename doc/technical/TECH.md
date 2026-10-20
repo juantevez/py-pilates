@@ -538,7 +538,7 @@ Repositorio aparte: `pilates-ui` (`../../front-ui-code/pilates-ui`). Es una SPA 
 | `js/api.js` | Cliente `fetch`: agrega el Bearer, convierte `{error, detail}` en `ApiError(status, code, message)` y hace logout ante un 401 con sesión |
 | `js/session.js` | Token y usuario en `localStorage` (`pilates.session`) |
 | `js/app.js` | Router con History API: rutas `guest` / `user` / `admin`, redirecciones y navegación |
-| `js/theme.js` | Tema Sistema → Claro → Oscuro (`localStorage` `pilates.theme`). Un script inline en `index.html` lo aplica antes del primer pintado |
+| `js/theme.js` | Tema Sistema → Claro → Oscuro (`localStorage` `pilates.theme`). `js/theme-init.js` lo aplica antes del primer pintado (archivo aparte: la CSP del front no admite scripts inline) |
 | `js/html.js`, `js/ui.js` | Templates `html\`\`` con escape, `mount`, `dialog()`, delegación `on()` |
 | `js/views/*` | Pantallas |
 
