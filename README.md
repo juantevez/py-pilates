@@ -101,7 +101,7 @@ Todas son configurables por variables de entorno (ver `.env.example`).
 | Anticipación mínima | `MIN_BOOKING_ADVANCE_MINUTES=0`. Con 1440 se aplica la regla de "24 h" de la v1 del documento |
 | Cancelación | Hasta **1 h** antes del inicio |
 | Límites por alumno | Máx. **2 clases por día** y **1 por bloque** (mañana/tarde) |
-| Lista de espera | Solo si la clase está llena. Al liberarse un lugar se avisa por correo a todos los anotados y reserva el primero que entra |
+| Lista de espera | Solo si la clase está llena. Al liberarse un lugar, se le reserva automáticamente al primero de la lista que pueda tomarlo (respetando sus límites) y se le avisa por correo; si no lo quiere, lo cancela. En la última hora antes de la clase se avisa a todos y reserva el primero que entra |
 | Cierres | Carga manual (día o rango). Cancela los turnos del día (`cancelada_por_admin`), avisa a los alumnos y registra auditoría |
 | Reactivar / reabrir | Una clase cancelada se puede **reactivar**. Un cierre (un día o un rango, ej. vacaciones) se **reabre** eliminándolo. Las clases vuelven a estar disponibles y se avisa por email a quienes habían perdido el turno. La reserva no se restaura automáticamente: el lugar pudo haberlo tomado otro alumno |
 | Apertura nocturna | Genera la grilla (idempotente) y avisa a todos los alumnos. Si el día está cerrado, envía el aviso "sin clases" con el próximo día hábil |

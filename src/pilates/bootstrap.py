@@ -19,8 +19,9 @@ from pilates.booking.application.services import (
     JoinWaitlist,
     LeaveWaitlist,
     MarkAttendance,
+    PromoteFromWaitlist,
 )
-from pilates.booking.domain.events import TurnoCancelado, TurnoReservado
+from pilates.booking.domain.events import LugarLiberado, TurnoCancelado, TurnoReservado
 from pilates.booking.domain.policy import BookingPolicy
 from pilates.config import Settings
 from pilates.identity.adapters.security import BcryptPasswordHasher, JwtTokenService, Sha256SecretTokenGenerator
@@ -176,6 +177,8 @@ def build_container(
     registry.subscribe(CorreoSolicitado, "notifications.enviar_correo", DeliverEmail(email_sender))
     registry.subscribe(TurnoReservado, "notifications.confirmacion", notifications.on_turno_reservado)
     registry.subscribe(TurnoCancelado, "notifications.cancelacion_y_lista_espera", notifications.on_turno_cancelado)
+    registry.subscribe(TurnoCancelado, "booking.promover_lista_espera", PromoteFromWaitlist(uow, clock, policy))
+    registry.subscribe(LugarLiberado, "notifications.lista_espera", notifications.on_lugar_liberado)
     registry.subscribe(TurnosHabilitados, "notifications.apertura", notifications.on_turnos_habilitados)
     registry.subscribe(ClasesReabiertas, "notifications.clases_reabiertas", notifications.on_clases_reabiertas)
     registry.subscribe(DiaSinClases, "notifications.dia_sin_clases", notifications.on_dia_sin_clases)

@@ -5,7 +5,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 
-from pilates.booking.domain.events import TurnoCancelado, TurnoReservado
+from pilates.booking.domain.events import LugarLiberado, TurnoCancelado, TurnoReservado
 from pilates.booking.domain.model import CanceladoPor
 from pilates.identity.domain.events import PasswordResetRequested, UserInvited
 from pilates.notifications.application import templates
@@ -55,30 +55,40 @@ class NotificationHandlers:
         with self._uow() as uow:
             user, clase = uow.users.get(event.user_id), uow.clases.get(event.clase_id)
             if user and clase:
-                queue_email(uow, str(user.email), templates.confirmacion(user.full_name, clase.fecha, clase.start_time))
+                template = templates.lugar_asignado if event.desde_lista_espera else templates.confirmacion
+                queue_email(uow, str(user.email), template(user.full_name, clase.fecha, clase.start_time))
             uow.commit()
 
     def on_turno_cancelado(self, event: TurnoCancelado) -> None:
+        """Aviso al alumno cuando cancela el gimnasio. El lugar liberado lo maneja PromoteFromWaitlist."""
+        if event.por != CanceladoPor.GIMNASIO.value:
+            return
+        with self._uow() as uow:
+            clase, user = uow.clases.get(event.clase_id), uow.users.get(event.user_id)
+            if clase and user:
+                template = templates.cancelacion_gimnasio if event.con_clase else templates.turno_cancelado_gimnasio
+                queue_email(uow, str(user.email), template(user.full_name, clase.fecha, clase.start_time, event.motivo))
+            uow.commit()
+
+    def on_lugar_liberado(self, event: LugarLiberado) -> None:
+        """Última hora antes de la clase: aviso a toda la lista de espera (gana el primero que reserva)."""
         now = self._clock.now()
         with self._uow() as uow:
             clase = uow.clases.get(event.clase_id)
-            if clase is None:
+            if clase is None or not clase.is_active or clase.starts_at(now.tzinfo) <= now:
                 return
-            if event.por == CanceladoPor.GIMNASIO.value and (user := uow.users.get(event.user_id)):
-                template = templates.cancelacion_gimnasio if event.con_clase else templates.turno_cancelado_gimnasio
-                queue_email(uow, str(user.email), template(user.full_name, clase.fecha, clase.start_time, event.motivo))
-            # Aviso de liberación a la lista de espera (gana el primero que reserva).
-            if clase.is_active and clase.starts_at(now.tzinfo) > now and uow.turnos.count_occupied(clase.id) < clase.max_capacity:
-                url = f"{self._frontend_url}/clases/{clase.id}"
-                for entry in uow.waitlist.list_by_clase(clase.id):
-                    waiting = uow.users.get(entry.user_id)
-                    if waiting is None or waiting.is_blocked:
-                        continue
-                    queue_email(
-                        uow, str(waiting.email), templates.lugar_liberado(waiting.full_name, clase.fecha, clase.start_time, url)
-                    )
-                    entry.mark_notified(now)
-                    uow.waitlist.save(entry)
+            if uow.turnos.count_occupied(clase.id) >= clase.max_capacity:
+                return
+            url = f"{self._frontend_url}/clases/{clase.id}"
+            for entry in uow.waitlist.list_by_clase(clase.id):
+                waiting = uow.users.get(entry.user_id)
+                if waiting is None or waiting.is_blocked:
+                    continue
+                queue_email(
+                    uow, str(waiting.email), templates.lugar_liberado(waiting.full_name, clase.fecha, clase.start_time, url)
+                )
+                entry.mark_notified(now)
+                uow.waitlist.save(entry)
             uow.commit()
 
     def on_clases_reabiertas(self, event: ClasesReabiertas) -> None:

@@ -40,7 +40,7 @@ Sistema de reservas de turnos para un estudio de Pilates con grilla fija:
 - **Alumnos:** reservan el **día hábil siguiente**. Los turnos se habilitan a las **20:00** del día hábil anterior. También pueden reservar **hoy** si queda lugar.
 - **Límites por alumno:** 2 clases por día y 1 por bloque (mañana o tarde).
 - **Cancelación:** hasta 1 hora antes de la clase.
-- **Lista de espera:** cuando se libera un lugar se avisa por email a todos los anotados. Reserva el primero que entra.
+- **Lista de espera con prioridad:** cuando se libera un lugar, el sistema se lo reserva automáticamente al primero de la lista que pueda tomarlo (respetando sus límites) y le avisa por email. En la última hora antes de la clase, como ya no podría cancelarlo, se avisa a todos los anotados y reserva el primero que entra.
 - **Recepción (rol admin):**
   - Gestiona la grilla, los cierres (feriados, vacaciones) y la asistencia.
   - Da de alta alumnos, reserva en su nombre y cancela turnos puntuales.
@@ -607,6 +607,7 @@ Saltea la ventana de reserva, la anticipación y los límites diarios y por bloq
 | `CancelBooking` | `turnos` FOR UPDATE, `clases` FOR UPDATE | Valida que el turno sea del usuario (`permission_denied`) |
 | `AdminCancelBooking` | `turnos` FOR UPDATE, `clases` FOR UPDATE | Motivo opcional; audit `booking.cancelled_by_admin` |
 | `JoinWaitlist` / `LeaveWaitlist` | — | Única `(user_id, clase_id)` en `lista_espera` |
+| `PromoteFromWaitlist` | por candidato: `users` FOR UPDATE → `clases` FOR UPDATE | Handler de `TurnoCancelado` (worker). Ver [§10.2](#102-cancelación-y-lista-de-espera) |
 | `MarkAttendance` | `turnos` FOR UPDATE | Audit `booking.attendance` |
 | `CancelUpcomingBookingsOfBlockedUser` | — | Handler de `UserBlocked` (worker) |
 | `release_class_bookings` | — | API para `scheduling`: `cancel_with_class` por turno + `waitlist.delete_by_clase` |
@@ -644,9 +645,10 @@ Hay dos adaptadores de `EmailSender`: `SmtpEmailSender` (timeout de 15 s, STARTT
 | Evento | Handler | Destinatarios | Plantilla (asunto) |
 |---|---|---|---|
 | `TurnoReservado` | `on_turno_reservado` | el alumno | "Reserva confirmada: {fecha} {hora} hs" |
+| `TurnoReservado` (`desde_lista_espera=true`) | `on_turno_reservado` | el alumno al que se le asignó el lugar | "¡Tenés lugar! Te reservamos la clase del {fecha} {hora} hs" (`lugar_asignado`) |
 | `TurnoCancelado` (`por=gimnasio`, `con_clase=true`) | `on_turno_cancelado` | el alumno | "Clase cancelada: …" (`cancelacion_gimnasio`) |
 | `TurnoCancelado` (`por=gimnasio`, `con_clase=false`) | `on_turno_cancelado` | el alumno | "Turno cancelado: …" (`turno_cancelado_gimnasio`) |
-| `TurnoCancelado` (cualquiera) | `on_turno_cancelado` | **toda** la lista de espera (no bloqueados), si la clase está activa, no empezó y quedó lugar | "¡Se liberó un lugar! …" + link `/clases/{id}`; marca `notified_at` |
+| `LugarLiberado` | `on_lugar_liberado` | **toda** la lista de espera (no bloqueados), si la clase está activa, no empezó y quedó lugar. Sólo en la última hora antes de la clase | "¡Se liberó un lugar! …" + link `/clases/{id}`; marca `notified_at` |
 | `ClasesReabiertas` | `on_clases_reabiertas` | alumnos con turnos `cancelled_with_class` en esas clases (agrupado por alumno) | "¡Buenas noticias! …" + link `/reservar` |
 | `TurnosHabilitados` | `on_turnos_habilitados` | todos los alumnos activos | "Ya podés reservar tus turnos del {fecha}" |
 | `DiaSinClases` | `on_dia_sin_clases` | todos los alumnos activos, menos `excluir_user_ids` (los que ya reciben la cancelación de su turno) | "Sin clases el {fecha}" (con el próximo día hábil) |
@@ -776,13 +778,29 @@ sequenceDiagram
 
     A->>API: POST /turnos/{id}/cancelar
     API->>DB: lock turno + clase, valida ≥ 1 h antes, UPDATE status=cancelada
-    API->>DB: COMMIT
-    API->>W: TurnoCancelado(por=alumno)
-    W->>DB: clase activa, no empezó, ocupados < capacidad?
-    W-->>B: email "¡Se liberó un lugar!" a todos
-    W->>DB: lista_espera.notified_at = now
-    Note over B: Reserva el primero que hace POST /turnos.<br/>Al reservar, su entrada de lista de espera se borra.
+    API->>DB: COMMIT (+ outbox)
+    API->>W: TurnoCancelado → PromoteFromWaitlist
+    alt falta más de 1 h para la clase
+        loop por orden de llegada, mientras quede lugar
+            W->>DB: lock usuario → lock clase, recuenta ocupados
+            alt el alumno puede tomarlo (límites diarios y de bloque)
+                W->>DB: reserva (desde_lista_espera) + borra su entrada, COMMIT
+                W-->>B: email "¡Tenés lugar! Te reservamos la clase…"
+            else llegó a su límite
+                Note over W: sigue anotado; se prueba con el siguiente
+            end
+        end
+    else última hora (ya no podría cancelarlo)
+        W->>W: LugarLiberado
+        W-->>B: email "¡Se liberó un lugar!" a todos; marca notified_at
+        Note over B: Reserva el primero que hace POST /turnos
+    end
 ```
+
+- **Por qué en el worker y una transacción por candidato.** Cada intento toma los locks en el mismo orden que `BookClass` (usuario → clase) y vuelve a contar los lugares, así que una reserva directa que llegue al mismo tiempo no puede superar el cupo (`test_waitlist_promotion_racing_direct_bookings_never_exceeds_capacity`).
+- **Si nadie puede tomarlo** (todos llegaron a su límite), el lugar queda libre para cualquiera y los anotados siguen en la lista.
+- **El turno asignado es uno más:** se puede cancelar hasta 1 h antes, recibe recordatorio y cuenta para los límites. `booked_by` queda `alumno`, porque lo pidió él al anotarse.
+- **Disparadores:** cualquier `TurnoCancelado` con la clase activa: cancelación del alumno, del admin (turno puntual) o por bloqueo de cuenta. Cancelar o cerrar la clase entera vacía la lista de espera.
 
 ### 10.3 Apertura nocturna (job de las 20:00)
 
@@ -886,7 +904,7 @@ sequenceDiagram
 
 1. `POST /admin/usuarios/{id}/bloquear` pasa el estado a `bloqueado`, emite `UserBlocked` y registra el audit `user.blocked`.
 2. El worker ejecuta `CancelUpcomingBookingsOfBlockedUser`: aplica `cancel_by_gym("Cuenta suspendida")` a cada turno confirmado cuya clase empieza desde ahora.
-3. Cada cancelación emite `TurnoCancelado`, que avisa al alumno y a la lista de espera.
+3. Cada cancelación emite `TurnoCancelado`, que avisa al alumno y le pasa el lugar al primero de la lista de espera.
 4. A partir de ahí, cualquier request con su token responde `403 user_blocked`, porque `GetCurrentUser` verifica el estado.
 
 ---
@@ -938,7 +956,7 @@ Hay dos tests que lo verifican en `tests/application/test_concurrency.py`. Lanza
 |---|---|
 | Cancelar los turnos de una clase cancelada o cerrada | Todos los emails |
 | Vaciar la lista de espera de esa clase | Cancelar los turnos futuros de un usuario bloqueado |
-| Auditoría de acciones admin | Aviso a la lista de espera |
+| Auditoría de acciones admin | Asignación del lugar al primero de la lista de espera (o aviso a todos en la última hora) |
 | Borrar la entrada de lista de espera al reservar | Aviso de clases reabiertas |
 
 ---
@@ -953,8 +971,9 @@ Hay dos tests que lo verifican en `tests/application/test_concurrency.py`. Lanza
 | `UserInvited` | `CreateUserByAdmin` | `user_id`, `set_password_url` | `notifications.bienvenida` |
 | `UserBlocked` | `User.block` | `user_id`, `reason` | `booking.cancelar_turnos_bloqueado` |
 | `PasswordResetRequested` | `RequestPasswordReset` | `user_id`, `reset_url` | `notifications.reset_password` |
-| `TurnoReservado` | `Turno.reserve` / `rebook` | `turno_id`, `user_id`, `clase_id` | `notifications.confirmacion` |
-| `TurnoCancelado` | `Turno._cancel` | `turno_id`, `user_id`, `clase_id`, `por`, `motivo`, `con_clase` | `notifications.cancelacion_y_lista_espera` |
+| `TurnoReservado` | `Turno.reserve` / `rebook` | `turno_id`, `user_id`, `clase_id`, `desde_lista_espera` | `notifications.confirmacion` |
+| `TurnoCancelado` | `Turno._cancel` | `turno_id`, `user_id`, `clase_id`, `por`, `motivo`, `con_clase` | `notifications.cancelacion_y_lista_espera` (aviso al alumno si canceló el gimnasio; conserva el nombre por compatibilidad con el outbox), `booking.promover_lista_espera` |
+| `LugarLiberado` | `PromoteFromWaitlist` | `clase_id` | `notifications.lista_espera` |
 | `TurnosHabilitados` | `GenerateDailyClasses`, `CreateCierres` | `fecha` | `notifications.apertura` |
 | `DiaSinClases` | `GenerateDailyClasses`, `CreateCierres` | `fecha`, `motivo`, `proximo_dia_habil`, `excluir_user_ids` | `notifications.dia_sin_clases` |
 | `ClasesReabiertas` | `ReactivateClase`, `DeleteCierre`, `GenerateDailyClasses` | `clase_ids` | `notifications.clases_reabiertas` |
@@ -1418,7 +1437,7 @@ La regla general es que el front **no duplica reglas de negocio**: decide qué b
 
 ```bash
 docker compose up -d db          # los tests crean y usan la base pilates_test
-.venv/bin/pytest                 # 74 tests
+.venv/bin/pytest                 # 77 tests
 ```
 
 | Carpeta | Tipo | Qué cubre |
@@ -1427,10 +1446,10 @@ docker compose up -d db          # los tests crean y usan la base pilates_test
 | `tests/unit/test_booking_domain.py` | Unitario | Política (cupo, ventana, límites), estados del turno, rebook, reglas de reactivación, reserva y cancelación admin, `cancelled_with_class` |
 | `tests/unit/test_reminders.py` | Unitario | Horario del recordatorio el día de la clase (nunca antes de las 07:00) y omisión si se reservó después |
 | `tests/unit/test_identity_domain.py` | Unitario | Email, bloqueo, admin no bloqueable, token de un solo uso |
-| `tests/application/test_api_flows.py` | Integración (TestClient + Postgres real) | Flujos end-to-end por HTTP: registro y login, apertura, cupo y lista de espera, límites, ventana de cancelación, cierres (incluido cerrar un día ya habilitado: aviso general y apertura del siguiente), job nocturno (incluido "mañana cerrado → abre el siguiente"), asistencia, recordatorios, bloqueo, reset, calendario, reactivación, rangos de vacaciones, alta por admin, reserva y cancelación admin, cupo con asistencia marcada |
+| `tests/application/test_api_flows.py` | Integración (TestClient + Postgres real) | Flujos end-to-end por HTTP: registro y login, apertura, cupo y lista de espera (asignación automática por orden, salteando a quien llegó a su límite, y aviso a todos en la última hora), límites, ventana de cancelación, cierres (incluido cerrar un día ya habilitado: aviso general y apertura del siguiente), job nocturno (incluido "mañana cerrado → abre el siguiente"), asistencia, recordatorios, bloqueo, reset, calendario, reactivación, rangos de vacaciones, alta por admin, reserva y cancelación admin, cupo con asistencia marcada |
 | `tests/application/test_rate_limit.py` | Integración + unitario | Límite de registro por IP, recuperación de contraseña por email (sin revelar cuentas) y por IP, bloqueo por fallos de un email (sin afectar otras cuentas), reset al loguear bien, límite por IP, vencimiento de la ventana, fail open sin Redis y sin reintentos |
 | `tests/application/test_outbox.py` | Integración | El evento sobrevive a Redis caído y el relay lo entrega; un handler fallido queda pendiente y se reintenta; el despacho es idempotente; las filas que agotaron reintentos no se reenvían; en un envío masivo o en los recordatorios, un fallo de SMTP sólo reintenta al destinatario que falló |
-| `tests/application/test_concurrency.py` | Integración con hilos | Nunca se supera el cupo (alumnos, y alumnos + admin) |
+| `tests/application/test_concurrency.py` | Integración con hilos | Nunca se supera el cupo (alumnos; alumnos + admin; asignación desde la lista de espera compitiendo con reservas directas) |
 
 En `conftest.py`:
 
@@ -1541,9 +1560,8 @@ Ordenadas por impacto estimado.
 1. **Latencia de login y registro en ráfagas.** bcrypt (costo 12, ~0,5 s por hash) satura la CPU con muchos logins simultáneos. La API ya corre con 4 workers, pero eso sólo mejora los demás endpoints (ver [§19.3](#193-workers-de-uvicorn)). *Mejoras posibles:*
    - Más CPU, o bajar el costo de bcrypt a 10 (~4 veces más rápido; decisión de seguridad).
    - Login, registro y recuperación de contraseña ya tienen rate limiting (ver [§17.1](#171-rate-limiting)).
-2. **Lista de espera sin prioridad.** Se avisa a todos y gana el más rápido. Es lo que se decidió, pero no hay reserva temporal para el primero de la lista.
-3. **JWT sin revocación ni refresh.** El logout sólo borra el token del cliente. La consulta del usuario en cada request mitiga el caso de bloqueo, a costa de una query por request.
-4. **Horizonte de cierres de 90 días.** `closed_dates_from` y `next_open_weekday` miran 90 días hacia adelante. Un cierre continuo más largo no se saltea del todo (caso borde).
-5. **Duplicación menor.** `scheduling.application.services.next_open_day` (consulta por día) y `calendar.next_open_weekday` (sobre un conjunto en memoria) resuelven lo mismo. Se podrían unificar.
-6. **Pool y sesiones.** Engine síncrono con pool de 5 + 10 por proceso (configurable). Con 4 workers de uvicorn y el worker de Celery el máximo teórico ronda las 90 conexiones, cerca del límite de 100 de Postgres; si se suman workers, bajar `DB_MAX_OVERFLOW` o usar PgBouncer.
-7. **Sin observabilidad estructurada.** Hay logs de texto, sin métricas ni tracing. Los resultados de Celery no se guardan (`backend=None`). *Mejora:* logs JSON, Flower o métricas de Celery, y un healthcheck que incluya la base y Redis.
+2. **JWT sin revocación ni refresh.** El logout sólo borra el token del cliente. La consulta del usuario en cada request mitiga el caso de bloqueo, a costa de una query por request.
+3. **Horizonte de cierres de 90 días.** `closed_dates_from` y `next_open_weekday` miran 90 días hacia adelante. Un cierre continuo más largo no se saltea del todo (caso borde).
+4. **Duplicación menor.** `scheduling.application.services.next_open_day` (consulta por día) y `calendar.next_open_weekday` (sobre un conjunto en memoria) resuelven lo mismo. Se podrían unificar.
+5. **Pool y sesiones.** Engine síncrono con pool de 5 + 10 por proceso (configurable). Con 4 workers de uvicorn y el worker de Celery el máximo teórico ronda las 90 conexiones, cerca del límite de 100 de Postgres; si se suman workers, bajar `DB_MAX_OVERFLOW` o usar PgBouncer.
+6. **Sin observabilidad estructurada.** Hay logs de texto, sin métricas ni tracing. Los resultados de Celery no se guardan (`backend=None`). *Mejora:* logs JSON, Flower o métricas de Celery, y un healthcheck que incluya la base y Redis.

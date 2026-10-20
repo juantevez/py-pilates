@@ -55,13 +55,66 @@ def test_capacity_waitlist_and_release(api: Api, outbox):
     outbox.outbox.clear()
     r = api.client.post(f"/turnos/{turnos[0]}/cancelar", headers=students[0])
     assert r.status_code == 200 and r.json()["status"] == "cancelada"
-    assert [m.to for m in outbox.outbox if "liberó" in m.subject] == ["a4@test.com"]
-
-    r = api.client.post("/turnos", json={"clase_id": ids["09:00"]}, headers=students[4])
-    assert r.status_code == 201
+    # El lugar pasa solo al primero de la lista de espera.
+    assert [m.subject for m in outbox.outbox if m.to == "a4@test.com"] == [
+        "¡Tenés lugar! Te reservamos la clase del martes 13 de octubre 09:00 hs"
+    ]
+    nine = next(c for c in day_of(api.client.get("/clases/disponibles", headers=students[4]).json(), TUESDAY)["clases"]
+                if c["start_time"].startswith("09:00"))
+    assert nine["mi_turno_id"] and not nine["en_lista_espera"] and nine["completa"]
+    again = api.client.post("/turnos", json={"clase_id": ids["09:00"]}, headers=students[4])
+    assert again.json()["error"] == "already_booked"
     # Re-reserva tras cancelar reutiliza la fila (restricción única user+clase).
     full_again = api.client.post("/turnos", json={"clase_id": ids["09:00"]}, headers=students[0])
     assert full_again.json()["error"] == "class_full"
+
+
+def test_waitlist_priority_skips_students_at_their_limit(api: Api, outbox):
+    admin = api.user("admin@test.com", role=Role.ADMIN)
+    ids = open_tuesday(api, admin)
+    ana, beto, caro = api.user("ana@test.com", "Ana"), api.user("beto@test.com", "Beto"), api.user("caro@test.com", "Caro")
+    holders = [api.user(f"h{i}@test.com") for i in range(4)]
+    turnos = [api.client.post("/turnos", json={"clase_id": ids["10:00"]}, headers=h).json()["id"] for h in holders]
+    for h in (ana, beto, caro):  # en este orden
+        assert api.client.post(f"/clases/{ids['10:00']}/lista-espera", headers=h).status_code == 201
+    # Ana ya tiene su clase de la mañana: no puede tomar otra ese bloque.
+    assert api.client.post("/turnos", json={"clase_id": ids["08:00"]}, headers=ana).status_code == 201
+    outbox.outbox.clear()
+
+    api.client.post(f"/turnos/{turnos[0]}/cancelar", headers=holders[0])
+
+    assert [m.to for m in outbox.outbox if m.subject.startswith("¡Tenés lugar!")] == ["beto@test.com"]
+    assert not [m for m in outbox.outbox if "liberó" in m.subject]
+    ten = lambda h: next(c for c in day_of(api.client.get("/clases/disponibles", headers=h).json(), TUESDAY)["clases"]  # noqa: E731
+                         if c["start_time"].startswith("10:00"))
+    assert ten(beto)["mi_turno_id"] and not ten(beto)["en_lista_espera"]
+    assert ten(ana)["en_lista_espera"] and ten(caro)["en_lista_espera"]  # siguen anotadas
+    mine = api.client.get("/turnos/mios", headers=beto).json()["proximas"]
+    assert [t["start_time"][:5] for t in mine] == ["10:00"]
+
+    # Otro lugar: Ana sigue con el límite, pasa a Caro.
+    outbox.outbox.clear()
+    api.client.post(f"/turnos/{turnos[1]}/cancelar", headers=holders[1])
+    assert [m.to for m in outbox.outbox if m.subject.startswith("¡Tenés lugar!")] == ["caro@test.com"]
+
+
+def test_last_hour_spot_notifies_whole_waitlist_without_assigning(api: Api, clock: FixedClock, outbox):
+    admin = api.user("admin@test.com", role=Role.ADMIN)
+    ids = open_tuesday(api, admin)
+    holders = [api.user(f"h{i}@test.com") for i in range(4)]
+    turnos = [api.client.post("/turnos", json={"clase_id": ids["09:00"]}, headers=h).json()["id"] for h in holders]
+    ana, beto = api.user("ana@test.com", "Ana"), api.user("beto@test.com", "Beto")
+    for h in (ana, beto):
+        api.client.post(f"/clases/{ids['09:00']}/lista-espera", headers=h)
+    clock.set(2026, 10, 13, 8, 30)  # a media hora: un turno asignado ya no se podría cancelar
+    outbox.outbox.clear()
+
+    assert api.client.post(f"/admin/turnos/{turnos[0]}/cancelar", json={}, headers=admin).status_code == 200
+
+    assert sorted(m.to for m in outbox.outbox if "liberó" in m.subject) == ["ana@test.com", "beto@test.com"]
+    assert not [m for m in outbox.outbox if m.subject.startswith("¡Tenés lugar!")]
+    assert api.client.get("/turnos/mios", headers=ana).json()["proximas"] == []
+    assert api.client.post("/turnos", json={"clase_id": ids["09:00"]}, headers=beto).status_code == 201
 
 
 def test_per_user_limits(api: Api):
