@@ -1,21 +1,18 @@
-"""Bus de eventos de dominio.
+"""Registro de handlers de eventos de dominio.
 
-Cada evento puede tener varios handlers, identificados por nombre. Con Celery se encola
-una tarea por (evento, handler), de modo que un reintento no repite otros handlers.
+Cada evento puede tener varios handlers, identificados por nombre. El outbox guarda una fila
+por (evento, handler), de modo que un reintento no repite otros handlers (ver ``outbox.py``).
 """
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Callable
 from typing import Any
 
 from pydantic import TypeAdapter
 
-from pilates.shared.application.ports import EventBus
 from pilates.shared.domain.events import DomainEvent
 
-logger = logging.getLogger(__name__)
 Handler = Callable[[Any], None]
 
 
@@ -39,30 +36,3 @@ class EventRegistry:
 
     def deserialize(self, event_name: str, payload: dict) -> DomainEvent:
         return TypeAdapter(self._types[event_name]).validate_python(payload)
-
-
-class SyncEventBus(EventBus):
-    """Ejecuta los handlers en el mismo proceso (útil en desarrollo y tests)."""
-
-    def __init__(self, registry: EventRegistry) -> None:
-        self._registry = registry
-
-    def publish(self, events: list[DomainEvent]) -> None:
-        for event in events:
-            for name in self._registry.handler_names(event):
-                try:
-                    self._registry.handler(event.name(), name)(event)
-                except Exception:
-                    logger.exception("Handler %s falló para %s", name, event.name())
-
-
-class CeleryEventBus(EventBus):
-    def __init__(self, registry: EventRegistry, send_task: Callable[..., Any]) -> None:
-        self._registry = registry
-        self._send_task = send_task
-
-    def publish(self, events: list[DomainEvent]) -> None:
-        for event in events:
-            payload = self._registry.serialize(event)
-            for name in self._registry.handler_names(event):
-                self._send_task("pilates.dispatch_event", args=[event.name(), name, payload])

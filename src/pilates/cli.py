@@ -1,4 +1,4 @@
-"""Comandos de administración: `python -m pilates.cli create-admin | open-next-day | send-reminders`."""
+"""Comandos de administración: `python -m pilates.cli create-admin | open-next-day | send-reminders | relay-outbox`."""
 
 import sys
 
@@ -31,7 +31,16 @@ def send_reminders() -> None:
     print(f"Recordatorios enviados: {build_container(get_settings()).send_reminders.execute()}")
 
 
-COMMANDS = {"create-admin": create_admin, "open-next-day": open_next_day, "send-reminders": send_reminders}
+def relay_outbox() -> None:
+    print(f"Eventos reenviados: {build_container(get_settings()).relay_outbox.execute()}")
+
+
+COMMANDS = {
+    "create-admin": create_admin,
+    "open-next-day": open_next_day,
+    "send-reminders": send_reminders,
+    "relay-outbox": relay_outbox,
+}
 
 if __name__ == "__main__":
     if len(sys.argv) != 2 or sys.argv[1] not in COMMANDS:

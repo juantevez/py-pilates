@@ -18,7 +18,7 @@ from pilates.shared.application.ports import Clock
 
 TZ = ZoneInfo("America/Argentina/Buenos_Aires")
 TEST_DB_URL = os.getenv("TEST_DATABASE_URL", "postgresql+psycopg://pilates:pilates@localhost:5432/pilates_test")
-TABLES = "admin_audit_log, lista_espera, turnos, cierres_gimnasio, clases, password_reset_tokens, users"
+TABLES = "outbox, admin_audit_log, lista_espera, turnos, cierres_gimnasio, clases, password_reset_tokens, users"
 
 
 class FixedClock(Clock):
